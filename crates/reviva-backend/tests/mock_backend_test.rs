@@ -42,6 +42,38 @@ fn parses_valid_completion_response() {
 }
 
 #[test]
+fn falls_back_to_openai_completion_endpoint() {
+    let server = MockServer::start();
+    let legacy_mock = server.mock(|when, then| {
+        when.method(POST).path("/completion");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"error":"Unexpected endpoint or method. (POST /completion)"}"#);
+    });
+    let openai_mock = server.mock(|when, then| {
+        when.method(POST).path("/v1/completions");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"choices":[{"text":"SUMMARY:\n- fallback works"}]}"#);
+    });
+
+    let backend = LlamaCompletionBackend::new();
+    let response = backend
+        .complete(&request(server.url(""), 10_000))
+        .expect("fallback request should succeed");
+
+    legacy_mock.assert();
+    openai_mock.assert();
+    match response.response_interpretation {
+        ResponseInterpretation::Completed { content } => {
+            assert!(content.contains("fallback works"));
+        }
+        _ => panic!("expected completed interpretation"),
+    }
+    assert!(response.raw_http_body.contains("\"choices\""));
+}
+
+#[test]
 fn empty_response_maps_to_empty_error() {
     let server = MockServer::start();
     server.mock(|when, then| {
