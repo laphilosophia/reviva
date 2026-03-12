@@ -841,9 +841,7 @@ fn http_status_probe(host: &str, port: u16, path: &str, timeout: Duration) -> Op
     let Ok(mut addrs) = format!("{host}:{port}").to_socket_addrs() else {
         return None;
     };
-    let Some(addr) = addrs.next() else {
-        return None;
-    };
+    let addr = addrs.next()?;
     let Ok(mut stream) = std::net::TcpStream::connect_timeout(&addr, timeout) else {
         return None;
     };
