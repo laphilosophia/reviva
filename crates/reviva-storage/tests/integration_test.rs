@@ -89,6 +89,12 @@ fn roundtrip_session_config_and_set() {
     assert_eq!(loaded_session.findings.len(), 1);
     assert!(!loaded_session.backend.cache_prompt);
     assert_eq!(loaded_session.backend.slot_id, None);
+    assert!(storage
+        .root()
+        .join("findings")
+        .join("session-1.json")
+        .exists());
+    assert!(storage.root().join("findings").join("index.json").exists());
 
     let set = reviva_core::NamedSet {
         name: "critical".to_string(),
@@ -97,6 +103,9 @@ fn roundtrip_session_config_and_set() {
     storage.save_named_set(&set).expect("save set");
     let loaded_set = storage.load_named_set("critical").expect("load set");
     assert_eq!(loaded_set.paths, set.paths);
+    let sets_index =
+        std::fs::read_to_string(storage.root().join("sets").join("index.json")).expect("index");
+    assert!(sets_index.contains("critical"));
 }
 
 #[test]

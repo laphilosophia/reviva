@@ -1,4 +1,4 @@
-use reviva_core::Session;
+use reviva_core::{ResponseInterpretation, Session};
 use serde_json::{json, Value};
 
 pub fn export_session_markdown(session: &Session) -> String {
@@ -25,12 +25,17 @@ pub fn export_session_markdown(session: &Session) -> String {
     }
     output.push_str("```\n\n");
 
-    output.push_str("## Raw Response\n\n```text\n");
-    output.push_str(&session.response.raw_http_body);
-    if !session.response.raw_http_body.ends_with('\n') {
+    output.push_str("## Parsed Response\n\n```text\n");
+    let interpreted = render_interpreted_response(&session.response.response_interpretation);
+    output.push_str(&interpreted);
+    if !interpreted.ends_with('\n') {
         output.push('\n');
     }
     output.push_str("```\n\n");
+    output.push_str(&format!(
+        "- Raw Body Bytes (stored in session): `{}`\n\n",
+        session.response.raw_http_body.len()
+    ));
 
     if !session.warnings.is_empty() {
         output.push_str("## Warnings\n\n");
@@ -135,8 +140,8 @@ pub fn export_session_json(session: &Session) -> String {
             },
             "response": {
                 "status_code": session.response.status_code,
-                "raw_http_body": session.response.raw_http_body,
-                "response_interpretation": format!("{:?}", session.response.response_interpretation),
+                "response_interpretation": response_interpretation_to_json(&session.response.response_interpretation),
+                "raw_http_body_bytes": session.response.raw_http_body.len(),
             },
             "warnings": session.warnings,
             "created_at": session.created_at,
@@ -145,6 +150,30 @@ pub fn export_session_json(session: &Session) -> String {
     });
 
     serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "{}".to_string())
+}
+
+fn render_interpreted_response(interpretation: &ResponseInterpretation) -> String {
+    match interpretation {
+        ResponseInterpretation::Completed { content } => content.clone(),
+        ResponseInterpretation::Empty => "<empty>".to_string(),
+        ResponseInterpretation::Malformed { reason } => reason.clone(),
+    }
+}
+
+fn response_interpretation_to_json(interpretation: &ResponseInterpretation) -> Value {
+    match interpretation {
+        ResponseInterpretation::Completed { content } => json!({
+            "kind": "completed",
+            "content": content,
+        }),
+        ResponseInterpretation::Empty => json!({
+            "kind": "empty",
+        }),
+        ResponseInterpretation::Malformed { reason } => json!({
+            "kind": "malformed",
+            "reason": reason,
+        }),
+    }
 }
 
 fn format_target(target: &reviva_core::RevivaTarget) -> String {

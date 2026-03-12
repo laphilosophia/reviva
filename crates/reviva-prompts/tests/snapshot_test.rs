@@ -1,8 +1,8 @@
 use reviva_core::{BoundaryTarget, RevivaMode, RevivaTarget};
 use reviva_prompts::{
     apply_prompt_wrapper, build_prompt, default_review_profile, normalize_findings,
-    normalize_findings_with_reasons, parse_prompt_wrapper, parse_review_profile_toml,
-    PromptBuildConfig, PromptFile, PromptWrapper,
+    normalize_findings_for_profile_with_reasons, normalize_findings_with_reasons,
+    parse_prompt_wrapper, parse_review_profile_toml, PromptBuildConfig, PromptFile, PromptWrapper,
 };
 
 fn base_file(path: &str) -> PromptFile {
@@ -96,8 +96,8 @@ SUMMARY:
 FINDINGS:
 - summary: <text>
 severity: <low|medium|high|critical|unknown>
-confidence: <low|medium|high|unknown>
-risk_class: <correctness|security|memory|performance|maintainability|operator-trust|public-surface|unknown>
+  confidence: <low|medium|high|unknown>
+  risk_class: <correctness|security|memory|performance|maintainability|operator-trust|public-surface>
 location: <path or symbol>
 evidence: <short quote or hint>
 why: <impact>
@@ -164,6 +164,10 @@ focus = ["failure-semantics", "operator-trust"]
 severity_scale = ["release-blocker", "pre-launch-fix", "post-launch-watch"]
 confidence_scale = ["definite", "likely", "uncertain"]
 risk_classes = ["correctness", "security", "operator-trust"]
+
+[limits]
+max_findings = 5
+max_output_tokens = 256
 "#,
     )
     .expect("valid profile toml");
@@ -171,6 +175,8 @@ risk_classes = ["correctness", "security", "operator-trust"]
     assert_eq!(profile.name, "tracehound-launch");
     assert_eq!(profile.severity_scale.len(), 3);
     assert_eq!(profile.risk_classes[0], "correctness");
+    assert_eq!(profile.limits.max_findings, Some(5));
+    assert_eq!(profile.limits.max_output_tokens, Some(256));
 }
 
 #[test]
@@ -207,6 +213,73 @@ fn raw_only_and_partial_reasons_are_reported() {
         .reason_tags
         .iter()
         .any(|tag| tag == "invalid_confidence_label"));
+}
+
+#[test]
+fn normalization_truncates_findings_when_profile_has_limit() {
+    let mut profile = default_review_profile();
+    profile.limits.max_findings = Some(1);
+    let output = "SUMMARY:\n- ok\nFINDINGS:\n- summary: First\nseverity: high\nconfidence: high\nlocation: src/main.rs\nevidence: a\nwhy: a\naction: a\n- summary: Second\nseverity: medium\nconfidence: medium\nlocation: src/main.rs\nevidence: b\nwhy: b\naction: b\n";
+    let report = normalize_findings_for_profile_with_reasons(
+        &profile,
+        "s5",
+        RevivaMode::Contract,
+        "src/main.rs",
+        output,
+    );
+    assert_eq!(report.findings.len(), 1);
+    assert!(report
+        .reason_tags
+        .iter()
+        .any(|tag| tag == "max_findings_truncated"));
+}
+
+#[test]
+fn markdown_numbered_findings_are_parsed() {
+    let output = r#"SUMMARY:
+- Queue review
+
+FINDINGS:
+1. **Potential contract mismatch on overflow semantics**
+   - **severity: high**
+   - **confidence: medium**
+   - **risk_class: correctness**
+   - **location:** `lane-queue.ts:handleOverflow`
+   - **evidence:** `case 'drop_lowest'`
+   - **why:** callers cannot predict eviction lane deterministically
+   - **action:** document or enforce deterministic overflow contract
+"#;
+    let (state, findings) =
+        normalize_findings("s6", RevivaMode::Contract, "src/lane-queue.ts", output);
+    assert_eq!(state.as_str(), "structured");
+    assert_eq!(findings.len(), 1);
+    assert!(findings[0].summary.contains("Potential contract mismatch"));
+    assert_eq!(
+        findings[0].location_hint.as_deref(),
+        Some("lane-queue.ts:handleOverflow")
+    );
+}
+
+#[test]
+fn finding_without_summary_but_with_fields_is_retained() {
+    let output = r#"SUMMARY:
+- Queue review
+FINDINGS:
+1. **severity: medium**
+   - **confidence: high**
+   - **risk_class: correctness**
+   - **location:** `lane-queue.ts:enqueue`
+   - **evidence:** `if (lane.length >= laneConfig.maxSize)`
+   - **why:** overflow behavior is ambiguous
+   - **action:** make overflow semantics explicit
+"#;
+    let (state, findings) =
+        normalize_findings("s7", RevivaMode::Contract, "src/lane-queue.ts", output);
+    assert_eq!(state.as_str(), "structured");
+    assert_eq!(findings.len(), 1);
+    assert!(findings[0]
+        .summary
+        .contains("overflow behavior is ambiguous"));
 }
 
 #[test]

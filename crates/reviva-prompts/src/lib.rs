@@ -13,19 +13,34 @@ pub struct ReviewProfileSpec {
     pub severity_scale: Vec<String>,
     pub confidence_scale: Vec<String>,
     pub risk_classes: Vec<String>,
+    pub limits: ReviewProfileLimits,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ReviewProfileLimits {
+    pub max_findings: Option<usize>,
+    pub max_output_tokens: Option<u32>,
 }
 
 impl ReviewProfileSpec {
     pub fn canonical_text(&self) -> String {
         format!(
-            "name={}\ngoal={}\nrules={}\nfocus={}\nseverity={}\nconfidence={}\nrisk={}",
+            "name={}\ngoal={}\nrules={}\nfocus={}\nseverity={}\nconfidence={}\nrisk={}\nmax_findings={}\nmax_output_tokens={}",
             self.name,
             self.goal,
             self.global_rules.join("|"),
             self.focus.join("|"),
             self.severity_scale.join("|"),
             self.confidence_scale.join("|"),
-            self.risk_classes.join("|")
+            self.risk_classes.join("|"),
+            self.limits
+                .max_findings
+                .map(|value| value.to_string())
+                .unwrap_or_default(),
+            self.limits
+                .max_output_tokens
+                .map(|value| value.to_string())
+                .unwrap_or_default()
         )
     }
 }
@@ -100,6 +115,7 @@ pub fn built_in_review_profile(name: &str) -> Option<ReviewProfileSpec> {
                 "operator-trust".to_string(),
                 "public-surface".to_string(),
             ],
+            limits: ReviewProfileLimits::default(),
         }),
         "launch-readiness" => Some(ReviewProfileSpec {
             name: "launch-readiness".to_string(),
@@ -135,6 +151,7 @@ pub fn built_in_review_profile(name: &str) -> Option<ReviewProfileSpec> {
                 "operator-trust".to_string(),
                 "public-surface".to_string(),
             ],
+            limits: ReviewProfileLimits::default(),
         }),
         "strict" => Some(ReviewProfileSpec {
             name: "strict".to_string(),
@@ -168,6 +185,7 @@ pub fn built_in_review_profile(name: &str) -> Option<ReviewProfileSpec> {
                 "maintainability".to_string(),
                 "operator-trust".to_string(),
             ],
+            limits: ReviewProfileLimits::default(),
         }),
         _ => None,
     }
@@ -189,6 +207,13 @@ struct ReviewProfileToml {
     severity_scale: Option<Vec<String>>,
     confidence_scale: Option<Vec<String>>,
     risk_classes: Option<Vec<String>>,
+    limits: Option<ReviewProfileLimitsToml>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReviewProfileLimitsToml {
+    max_findings: Option<usize>,
+    max_output_tokens: Option<u32>,
 }
 
 pub fn parse_review_profile_toml(content: &str) -> Result<ReviewProfileSpec, ReviewProfileError> {
@@ -224,6 +249,13 @@ pub fn parse_review_profile_toml(content: &str) -> Result<ReviewProfileSpec, Rev
         severity_scale: parsed.severity_scale.unwrap_or_default(),
         confidence_scale: parsed.confidence_scale.unwrap_or_default(),
         risk_classes: parsed.risk_classes.unwrap_or_default(),
+        limits: parsed
+            .limits
+            .map(|limits| ReviewProfileLimits {
+                max_findings: limits.max_findings,
+                max_output_tokens: limits.max_output_tokens,
+            })
+            .unwrap_or_default(),
     })
 }
 
@@ -424,6 +456,14 @@ pub fn build_prompt(
             profile.risk_classes.join(", ")
         ));
     }
+    if let Some(max_findings) = profile.limits.max_findings {
+        prompt.push_str(&format!("Profile limit max findings: {max_findings}\n"));
+    }
+    if let Some(max_output_tokens) = profile.limits.max_output_tokens {
+        prompt.push_str(&format!(
+            "Profile limit max output tokens: {max_output_tokens}\n"
+        ));
+    }
     prompt.push_str(&format!("Focus: {}\n", mode_focus(mode)));
     prompt.push_str(&format!(
         "Target: {}\n",
@@ -466,15 +506,29 @@ pub fn build_prompt(
         prompt.push_str(&format!("--- END FILE {} ---\n", file.path));
     }
 
+    let severity_contract =
+        format_scale(&profile.severity_scale, "low|medium|high|critical|unknown");
+    let confidence_contract = format_scale(&profile.confidence_scale, "low|medium|high|unknown");
+    let risk_contract = format_scale(
+        &profile.risk_classes,
+        "correctness|security|memory|performance|maintainability|operator-trust|public-surface|unknown",
+    );
+    prompt.push_str("\nOutput contract (plain text):\n");
+    prompt.push_str("SUMMARY:\n- one short summary line\nFINDINGS:\n");
+    if let Some(max_findings) = profile.limits.max_findings {
+        prompt.push_str(&format!("- return at most {max_findings} findings\n"));
+    }
     prompt.push_str(
-        "\nOutput contract (plain text):\n\
-SUMMARY:\n\
-- one short summary line\n\
-FINDINGS:\n\
-- summary: <text>\n\
-  severity: <low|medium|high|critical|unknown>\n\
-  confidence: <low|medium|high|unknown>\n\
-  risk_class: <correctness|security|memory|performance|maintainability|operator-trust|public-surface|unknown>\n\
+        "- summary: <text>\n\
+  severity: <",
+    );
+    prompt.push_str(&severity_contract);
+    prompt.push_str(">\n  confidence: <");
+    prompt.push_str(&confidence_contract);
+    prompt.push_str(">\n  risk_class: <");
+    prompt.push_str(&risk_contract);
+    prompt.push_str(
+        ">\n\
   location: <path or symbol>\n\
   evidence: <short quote or hint>\n\
   why: <impact>\n\
@@ -510,6 +564,22 @@ pub fn normalize_findings_with_reasons(
     target: &str,
     raw_output: &str,
 ) -> NormalizationReport {
+    normalize_findings_for_profile_with_reasons(
+        &default_review_profile(),
+        session_id,
+        mode,
+        target,
+        raw_output,
+    )
+}
+
+pub fn normalize_findings_for_profile_with_reasons(
+    profile: &ReviewProfileSpec,
+    session_id: &str,
+    mode: RevivaMode,
+    target: &str,
+    raw_output: &str,
+) -> NormalizationReport {
     let mut findings = Vec::new();
     let mut current_lines = Vec::<String>::new();
     let mut in_findings = false;
@@ -523,7 +593,7 @@ pub fn normalize_findings_with_reasons(
 
     for line in raw_output.lines() {
         let trimmed = line.trim();
-        if trimmed.eq_ignore_ascii_case("FINDINGS:") {
+        if is_findings_header(trimmed) {
             in_findings = true;
             saw_findings_header = true;
             continue;
@@ -533,32 +603,31 @@ pub fn normalize_findings_with_reasons(
             continue;
         }
 
-        if let Some(value) = trimmed
-            .strip_prefix("severity:")
-            .or_else(|| trimmed.strip_prefix("- severity:"))
-        {
+        if let Some(value) = extract_field_value(trimmed, "severity") {
             saw_severity_label = true;
-            if parse_model_severity(value.trim()).is_none() {
+            if parse_model_severity(value.trim(), profile).is_none()
+                && !is_explicit_unknown_severity(&value)
+            {
                 invalid_severity_label = true;
             }
         }
-        if let Some(value) = trimmed
-            .strip_prefix("confidence:")
-            .or_else(|| trimmed.strip_prefix("- confidence:"))
-        {
+        if let Some(value) = extract_field_value(trimmed, "confidence") {
             saw_confidence_label = true;
-            let normalized = parse_model_confidence(value);
-            if normalized == Confidence::Unknown && !is_explicit_unknown_confidence(value) {
+            let normalized = parse_model_confidence(&value, profile);
+            if normalized == Confidence::Unknown && !is_explicit_unknown_confidence(&value) {
                 invalid_confidence_label = true;
             }
         }
 
-        if (trimmed.starts_with("- summary:") || trimmed.starts_with("summary:"))
-            && !current_lines.is_empty()
-        {
-            if let Some(finding) =
-                parse_finding_block(session_id, mode, target, findings.len() + 1, &current_lines)
-            {
+        if is_finding_start_line(trimmed) && !current_lines.is_empty() {
+            if let Some(finding) = parse_finding_block(
+                profile,
+                session_id,
+                mode,
+                target,
+                findings.len() + 1,
+                &current_lines,
+            ) {
                 findings.push(finding);
             } else {
                 dropped_blocks += 1;
@@ -566,14 +635,14 @@ pub fn normalize_findings_with_reasons(
             current_lines.clear();
         }
 
-        if trimmed.starts_with('-')
-            || trimmed.starts_with("severity:")
-            || trimmed.starts_with("confidence:")
-            || trimmed.starts_with("risk_class:")
-            || trimmed.starts_with("location:")
-            || trimmed.starts_with("evidence:")
-            || trimmed.starts_with("why:")
-            || trimmed.starts_with("action:")
+        if is_finding_start_line(trimmed)
+            || extract_field_value(trimmed, "severity").is_some()
+            || extract_field_value(trimmed, "confidence").is_some()
+            || extract_field_value(trimmed, "risk_class").is_some()
+            || extract_field_value(trimmed, "location").is_some()
+            || extract_field_value(trimmed, "evidence").is_some()
+            || extract_field_value(trimmed, "why").is_some()
+            || extract_field_value(trimmed, "action").is_some()
         {
             findings_payload_lines += 1;
             current_lines.push(trimmed.to_string());
@@ -581,9 +650,14 @@ pub fn normalize_findings_with_reasons(
     }
 
     if !current_lines.is_empty() {
-        if let Some(finding) =
-            parse_finding_block(session_id, mode, target, findings.len() + 1, &current_lines)
-        {
+        if let Some(finding) = parse_finding_block(
+            profile,
+            session_id,
+            mode,
+            target,
+            findings.len() + 1,
+            &current_lines,
+        ) {
             findings.push(finding);
         } else {
             dropped_blocks += 1;
@@ -663,6 +737,12 @@ pub fn normalize_findings_with_reasons(
     for finding in &mut findings {
         finding.normalization_state = state;
     }
+    if let Some(max_findings) = profile.limits.max_findings {
+        if findings.len() > max_findings {
+            findings.truncate(max_findings);
+            reason_tags.push("max_findings_truncated".to_string());
+        }
+    }
     NormalizationReport {
         state,
         findings,
@@ -671,6 +751,7 @@ pub fn normalize_findings_with_reasons(
 }
 
 fn parse_finding_block(
+    profile: &ReviewProfileSpec,
     session_id: &str,
     mode: RevivaMode,
     target: &str,
@@ -689,70 +770,71 @@ fn parse_finding_block(
     let mut raw_labels = Vec::new();
 
     for line in lines {
-        if let Some(value) = line
-            .strip_prefix("- summary:")
-            .or_else(|| line.strip_prefix("summary:"))
-        {
+        if let Some(value) = extract_field_value(line, "summary") {
             summary = Some(value.trim().to_string());
             continue;
         }
-        if let Some(value) = line
-            .strip_prefix("severity:")
-            .or_else(|| line.strip_prefix("- severity:"))
-        {
+        if let Some(value) = extract_field_value(line, "severity") {
             let label = value.trim().to_ascii_lowercase();
             raw_labels.push(label.clone());
-            if let Some((parsed, origin)) = parse_model_severity(&label) {
+            if let Some((parsed, origin)) = parse_model_severity(&label, profile) {
                 severity_origin = origin;
                 severity = Some(parsed);
             }
             continue;
         }
-        if let Some(value) = line
-            .strip_prefix("confidence:")
-            .or_else(|| line.strip_prefix("- confidence:"))
-        {
-            confidence = parse_model_confidence(value);
+        if let Some(value) = extract_field_value(line, "confidence") {
+            confidence = parse_model_confidence(&value, profile);
             continue;
         }
-        if let Some(value) = line
-            .strip_prefix("risk_class:")
-            .or_else(|| line.strip_prefix("- risk_class:"))
-        {
+        if let Some(value) = extract_field_value(line, "risk_class") {
             risk_class = Some(value.trim().to_string());
             continue;
         }
-        if let Some(value) = line
-            .strip_prefix("location:")
-            .or_else(|| line.strip_prefix("- location:"))
-        {
+        if let Some(value) = extract_field_value(line, "location") {
             location = Some(value.trim().to_string());
             continue;
         }
-        if let Some(value) = line
-            .strip_prefix("evidence:")
-            .or_else(|| line.strip_prefix("- evidence:"))
-        {
+        if let Some(value) = extract_field_value(line, "evidence") {
             evidence = Some(value.trim().to_string());
             continue;
         }
-        if let Some(value) = line
-            .strip_prefix("why:")
-            .or_else(|| line.strip_prefix("- why:"))
-        {
+        if let Some(value) = extract_field_value(line, "why") {
             why = Some(value.trim().to_string());
             continue;
         }
-        if let Some(value) = line
-            .strip_prefix("action:")
-            .or_else(|| line.strip_prefix("- action:"))
-        {
+        if let Some(value) = extract_field_value(line, "action") {
             action = Some(value.trim().to_string());
             continue;
         }
+        if summary.is_none() {
+            let candidate = normalize_findings_line(line);
+            if !candidate.is_empty() && !looks_like_field_line(&candidate) {
+                summary = Some(candidate);
+            }
+        }
     }
 
-    let summary = summary?;
+    let summary = match summary {
+        Some(value) => value,
+        None => {
+            if severity.is_some()
+                || confidence != Confidence::Unknown
+                || risk_class.is_some()
+                || location.is_some()
+                || evidence.is_some()
+                || why.is_some()
+                || action.is_some()
+            {
+                why.clone()
+                    .or_else(|| evidence.clone())
+                    .or_else(|| location.clone())
+                    .unwrap_or_else(|| format!("Finding {index}"))
+            } else {
+                return None;
+            }
+        }
+    };
     Some(Finding {
         id: format!("{session_id}-{index}"),
         session_id: session_id.to_string(),
@@ -777,8 +859,14 @@ fn estimate_tokens(text: &str) -> usize {
     (text.chars().count() / 4).saturating_add(1)
 }
 
-fn parse_model_severity(label: &str) -> Option<(Severity, SeverityOrigin)> {
+fn parse_model_severity(
+    label: &str,
+    profile: &ReviewProfileSpec,
+) -> Option<(Severity, SeverityOrigin)> {
     let normalized = label.trim().to_ascii_lowercase().replace(['_', ' '], "-");
+    if is_explicit_unknown_severity(&normalized) {
+        return None;
+    }
     match normalized.as_str() {
         "low" => Some((Severity::Low, SeverityOrigin::ModelLabeled)),
         "medium" => Some((Severity::Medium, SeverityOrigin::ModelLabeled)),
@@ -787,11 +875,20 @@ fn parse_model_severity(label: &str) -> Option<(Severity, SeverityOrigin)> {
         "release-blocker" | "blocker" => Some((Severity::Critical, SeverityOrigin::Normalized)),
         "pre-launch-fix" | "must-fix" => Some((Severity::High, SeverityOrigin::Normalized)),
         "post-launch-watch" | "watch" => Some((Severity::Medium, SeverityOrigin::Normalized)),
-        _ => None,
+        _ => profile
+            .severity_scale
+            .iter()
+            .position(|candidate| normalize_label(candidate) == normalized)
+            .map(|index| {
+                (
+                    severity_from_scale_index(index, profile.severity_scale.len()),
+                    SeverityOrigin::Normalized,
+                )
+            }),
     }
 }
 
-fn parse_model_confidence(value: &str) -> Confidence {
+fn parse_model_confidence(value: &str, profile: &ReviewProfileSpec) -> Confidence {
     let normalized = value.trim().to_ascii_lowercase().replace(['_', ' '], "-");
     match normalized.as_str() {
         "low" => Confidence::Low,
@@ -800,10 +897,155 @@ fn parse_model_confidence(value: &str) -> Confidence {
         "definite" | "certain" => Confidence::High,
         "likely" | "probable" => Confidence::Medium,
         "uncertain" | "unsure" => Confidence::Low,
-        _ => Confidence::Unknown,
+        _ => profile
+            .confidence_scale
+            .iter()
+            .position(|candidate| normalize_label(candidate) == normalized)
+            .map(confidence_from_scale_index)
+            .unwrap_or(Confidence::Unknown),
     }
+}
+
+fn is_findings_header(line: &str) -> bool {
+    normalize_findings_line(line).eq_ignore_ascii_case("findings:")
+}
+
+fn is_finding_start_line(line: &str) -> bool {
+    let normalized = normalize_findings_line(line);
+    if normalized.is_empty() {
+        return false;
+    }
+    if normalized.to_ascii_lowercase().starts_with("summary:") {
+        return true;
+    }
+    is_numbered_line(line) && !looks_like_field_line(&normalized)
+}
+
+fn is_numbered_line(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    let bytes = trimmed.as_bytes();
+    let mut index = 0_usize;
+    while index < bytes.len() && bytes[index].is_ascii_digit() {
+        index += 1;
+    }
+    index > 0
+        && index < bytes.len()
+        && bytes[index] == b'.'
+        && index + 1 < bytes.len()
+        && bytes[index + 1].is_ascii_whitespace()
+}
+
+fn normalize_findings_line(line: &str) -> String {
+    let mut value = line.trim();
+    value = strip_list_prefix(value);
+    let mut normalized = value.replace("**", "");
+    normalized = normalized.trim().to_string();
+    normalized = normalized.trim_matches('`').trim().to_string();
+    normalized
+}
+
+fn strip_list_prefix(value: &str) -> &str {
+    let mut current = value.trim_start();
+    loop {
+        if let Some(rest) = current.strip_prefix("- ") {
+            current = rest.trim_start();
+            continue;
+        }
+        if let Some(rest) = current.strip_prefix("* ") {
+            current = rest.trim_start();
+            continue;
+        }
+        let bytes = current.as_bytes();
+        let mut index = 0_usize;
+        while index < bytes.len() && bytes[index].is_ascii_digit() {
+            index += 1;
+        }
+        if index > 0
+            && index < bytes.len()
+            && bytes[index] == b'.'
+            && index + 1 < bytes.len()
+            && bytes[index + 1].is_ascii_whitespace()
+        {
+            current = current[index + 1..].trim_start();
+            continue;
+        }
+        break;
+    }
+    current
+}
+
+fn extract_field_value(line: &str, key: &str) -> Option<String> {
+    let normalized = normalize_findings_line(line);
+    let lowered = normalized.to_ascii_lowercase();
+    let key_prefix = format!("{key}:");
+    if !lowered.starts_with(&key_prefix) {
+        return None;
+    }
+    let value = normalized[key_prefix.len()..]
+        .trim()
+        .trim_matches('`')
+        .trim();
+    if value.is_empty() {
+        return None;
+    }
+    Some(value.to_string())
+}
+
+fn looks_like_field_line(normalized_line: &str) -> bool {
+    let lowered = normalized_line.to_ascii_lowercase();
+    lowered.starts_with("summary:")
+        || lowered.starts_with("severity:")
+        || lowered.starts_with("confidence:")
+        || lowered.starts_with("risk_class:")
+        || lowered.starts_with("location:")
+        || lowered.starts_with("evidence:")
+        || lowered.starts_with("why:")
+        || lowered.starts_with("action:")
 }
 
 fn is_explicit_unknown_confidence(value: &str) -> bool {
     value.trim().eq_ignore_ascii_case("unknown")
+}
+
+fn is_explicit_unknown_severity(value: &str) -> bool {
+    matches!(
+        normalize_label(value).as_str(),
+        "unknown" | "unrated" | "na" | "n/a"
+    )
+}
+
+fn format_scale(scale: &[String], fallback: &str) -> String {
+    if scale.is_empty() {
+        fallback.to_string()
+    } else {
+        scale.join("|")
+    }
+}
+
+fn normalize_label(value: &str) -> String {
+    value.trim().to_ascii_lowercase().replace(['_', ' '], "-")
+}
+
+fn severity_from_scale_index(index: usize, scale_len: usize) -> Severity {
+    if scale_len == 0 {
+        return Severity::Medium;
+    }
+    if index == 0 {
+        return Severity::Critical;
+    }
+    if index == 1 {
+        return Severity::High;
+    }
+    if index == 2 {
+        return Severity::Medium;
+    }
+    Severity::Low
+}
+
+fn confidence_from_scale_index(index: usize) -> Confidence {
+    match index {
+        0 => Confidence::High,
+        1 => Confidence::Medium,
+        _ => Confidence::Low,
+    }
 }

@@ -1,6 +1,10 @@
 use reviva_core::RevivaTarget;
-use reviva_repo::{load_target_files, scan_repository, RepoError, RepoScanConfig};
+use reviva_repo::{
+    load_incremental_target_files, load_target_files, resolve_incremental_target, scan_repository,
+    RepoError, RepoScanConfig,
+};
 use std::fs;
+use std::process::Command;
 use tempfile::TempDir;
 
 #[test]
@@ -69,4 +73,109 @@ fn oversized_target_triggers_file_level_refusal() {
         }
         error => panic!("unexpected error: {error:?}"),
     }
+}
+
+#[test]
+fn incremental_target_resolves_changed_reviewable_files() {
+    let temp = TempDir::new().expect("tempdir");
+    init_git_repo(temp.path());
+    fs::create_dir_all(temp.path().join("src")).expect("mkdir");
+    fs::write(temp.path().join("src").join("main.rs"), "fn main() {}\n").expect("write");
+    git(temp.path(), &["add", "."]);
+    git(temp.path(), &["commit", "-m", "initial"]);
+
+    fs::write(
+        temp.path().join("src").join("main.rs"),
+        "fn main() { println!(\"changed\"); }\n",
+    )
+    .expect("rewrite");
+
+    let target = resolve_incremental_target(temp.path(), "HEAD", &RepoScanConfig::default())
+        .expect("resolve incremental target");
+    match target {
+        RevivaTarget::Single(path) => assert_eq!(path, "src/main.rs"),
+        other => panic!("unexpected target: {other:?}"),
+    }
+}
+
+#[test]
+fn incremental_target_errors_when_no_changes() {
+    let temp = TempDir::new().expect("tempdir");
+    init_git_repo(temp.path());
+    fs::create_dir_all(temp.path().join("src")).expect("mkdir");
+    fs::write(temp.path().join("src").join("main.rs"), "fn main() {}\n").expect("write");
+    git(temp.path(), &["add", "."]);
+    git(temp.path(), &["commit", "-m", "initial"]);
+
+    let error = resolve_incremental_target(temp.path(), "HEAD", &RepoScanConfig::default())
+        .expect_err("should fail with no changes");
+    assert!(matches!(
+        error,
+        RepoError::NoReviewableChangedFiles { from } if from == "HEAD"
+    ));
+}
+
+#[test]
+fn incremental_loader_prefers_diff_hunks_with_context() {
+    let temp = TempDir::new().expect("tempdir");
+    init_git_repo(temp.path());
+    fs::create_dir_all(temp.path().join("src")).expect("mkdir");
+    fs::write(temp.path().join("src").join("main.rs"), "fn main() {}\n").expect("write");
+    git(temp.path(), &["add", "."]);
+    git(temp.path(), &["commit", "-m", "initial"]);
+
+    fs::write(
+        temp.path().join("src").join("main.rs"),
+        "fn main() {\n    println!(\"changed\");\n}\n",
+    )
+    .expect("rewrite");
+    let target = RevivaTarget::Single("src/main.rs".to_string());
+    let loaded =
+        load_incremental_target_files(temp.path(), &target, &RepoScanConfig::default(), "HEAD", 3)
+            .expect("load incremental files");
+
+    assert!(loaded.fallback_full_files.is_empty());
+    assert_eq!(loaded.files.len(), 1);
+    assert!(loaded.files[0].content.contains("REVIVA INCREMENTAL DIFF"));
+    assert!(loaded.files[0].content.contains("@@"));
+}
+
+#[test]
+fn incremental_loader_falls_back_to_full_file_when_diff_is_empty() {
+    let temp = TempDir::new().expect("tempdir");
+    init_git_repo(temp.path());
+    fs::create_dir_all(temp.path().join("src")).expect("mkdir");
+    fs::write(temp.path().join("src").join("main.rs"), "fn main() {}\n").expect("write");
+    git(temp.path(), &["add", "."]);
+    git(temp.path(), &["commit", "-m", "initial"]);
+
+    let target = RevivaTarget::Single("src/main.rs".to_string());
+    let loaded =
+        load_incremental_target_files(temp.path(), &target, &RepoScanConfig::default(), "HEAD", 3)
+            .expect("load incremental files");
+
+    assert_eq!(loaded.fallback_full_files, vec!["src/main.rs".to_string()]);
+    assert_eq!(loaded.files.len(), 1);
+    assert_eq!(loaded.files[0].content, "fn main() {}\n");
+}
+
+fn init_git_repo(root: &std::path::Path) {
+    git(root, &["init"]);
+    git(root, &["config", "user.email", "reviva@example.com"]);
+    git(root, &["config", "user.name", "reviva-test"]);
+}
+
+fn git(root: &std::path::Path, args: &[&str]) {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(root)
+        .output()
+        .expect("run git");
+    assert!(
+        output.status.success(),
+        "git {:?} failed stdout:\n{}\nstderr:\n{}",
+        args,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }

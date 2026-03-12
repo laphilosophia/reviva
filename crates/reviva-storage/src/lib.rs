@@ -104,7 +104,8 @@ impl Storage {
             .and_then(|_| fs::create_dir_all(self.root.join("findings")))
             .and_then(|_| fs::create_dir_all(self.root.join("cache")))
             .and_then(|_| fs::create_dir_all(self.root.join("exports")))
-            .map_err(|error| StorageError::Io(error.to_string()))
+            .map_err(|error| StorageError::Io(error.to_string()))?;
+        self.ensure_derived_indexes()
     }
 
     pub fn save_config(&self, config: &AppConfig) -> Result<(), StorageError> {
@@ -138,6 +139,8 @@ impl Storage {
             .join("sessions")
             .join(format!("{}.json", session.id));
         fs::write(&path, json).map_err(|error| StorageError::Io(error.to_string()))?;
+        self.save_derived_findings_session(session)?;
+        self.update_findings_index(session)?;
         Ok(path)
     }
 
@@ -189,6 +192,7 @@ impl Storage {
             .map_err(|error| StorageError::Serialize(error.to_string()))?;
         let path = self.root.join("sets").join(format!("{}.json", set.name));
         fs::write(&path, json).map_err(|error| StorageError::Io(error.to_string()))?;
+        self.update_sets_index()?;
         Ok(path)
     }
 
@@ -215,6 +219,9 @@ impl Storage {
         for entry in entries {
             let entry = entry.map_err(|error| StorageError::Io(error.to_string()))?;
             if !entry.path().is_file() {
+                continue;
+            }
+            if entry.file_name().to_string_lossy() == "index.json" {
                 continue;
             }
             let content = fs::read_to_string(entry.path())
@@ -281,6 +288,90 @@ impl Storage {
 
     fn review_cache_path(&self) -> PathBuf {
         self.root.join("cache").join("review-cache.json")
+    }
+
+    fn ensure_derived_indexes(&self) -> Result<(), StorageError> {
+        let sets_index_path = self.root.join("sets").join("index.json");
+        if !sets_index_path.exists() {
+            let json = serde_json::to_string_pretty(&DerivedSetsIndexDto::default())
+                .map_err(|error| StorageError::Serialize(error.to_string()))?;
+            fs::write(&sets_index_path, json)
+                .map_err(|error| StorageError::Io(error.to_string()))?;
+        }
+
+        let findings_index_path = self.root.join("findings").join("index.json");
+        if !findings_index_path.exists() {
+            let json = serde_json::to_string_pretty(&DerivedFindingsIndexDto::default())
+                .map_err(|error| StorageError::Serialize(error.to_string()))?;
+            fs::write(&findings_index_path, json)
+                .map_err(|error| StorageError::Io(error.to_string()))?;
+        }
+        Ok(())
+    }
+
+    fn save_derived_findings_session(&self, session: &Session) -> Result<(), StorageError> {
+        let path = self
+            .root
+            .join("findings")
+            .join(format!("{}.json", session.id));
+        let payload = DerivedFindingsSessionDto {
+            session_id: session.id.clone(),
+            review_mode: session.review_mode.as_str().to_string(),
+            target: match &session.selected_target {
+                RevivaTarget::Single(path) => format!("single:{path}"),
+                RevivaTarget::Set(paths) => format!("set:[{}]", paths.join(", ")),
+                RevivaTarget::Boundary(boundary) => {
+                    format!("boundary:left={} right={}", boundary.left, boundary.right)
+                }
+            },
+            findings: session.findings.iter().cloned().map(Into::into).collect(),
+        };
+        let json = serde_json::to_string_pretty(&payload)
+            .map_err(|error| StorageError::Serialize(error.to_string()))?;
+        fs::write(path, json).map_err(|error| StorageError::Io(error.to_string()))
+    }
+
+    fn update_findings_index(&self, session: &Session) -> Result<(), StorageError> {
+        let path = self.root.join("findings").join("index.json");
+        let mut index = if path.exists() {
+            let content =
+                fs::read_to_string(&path).map_err(|error| StorageError::Io(error.to_string()))?;
+            serde_json::from_str::<DerivedFindingsIndexDto>(&content)
+                .map_err(|error| StorageError::Deserialize(error.to_string()))?
+        } else {
+            DerivedFindingsIndexDto::default()
+        };
+
+        index.entries.retain(|entry| entry.session_id != session.id);
+        let normalization_state = session
+            .findings
+            .first()
+            .map(|finding| finding.normalization_state.as_str().to_string())
+            .unwrap_or_else(|| "raw_only".to_string());
+        index.entries.push(DerivedFindingsIndexEntryDto {
+            session_id: session.id.clone(),
+            findings_count: session.findings.len(),
+            normalization_state,
+            created_at: session.created_at.clone(),
+        });
+        index
+            .entries
+            .sort_by(|a, b| b.created_at.cmp(&a.created_at));
+
+        let json = serde_json::to_string_pretty(&index)
+            .map_err(|error| StorageError::Serialize(error.to_string()))?;
+        fs::write(path, json).map_err(|error| StorageError::Io(error.to_string()))
+    }
+
+    fn update_sets_index(&self) -> Result<(), StorageError> {
+        let sets = self.list_named_sets()?;
+        let index = DerivedSetsIndexDto {
+            entries: sets.into_iter().map(|set| set.name).collect(),
+        };
+        let json = serde_json::to_string_pretty(&index)
+            .map_err(|error| StorageError::Serialize(error.to_string()))?;
+        let path = self.root.join("sets").join("index.json");
+        fs::write(path, json).map_err(|error| StorageError::Io(error.to_string()))
     }
 }
 
@@ -620,6 +711,34 @@ struct FindingDto {
 struct ReviewCacheDto {
     #[serde(default)]
     entries: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Default)]
+struct DerivedSetsIndexDto {
+    #[serde(default)]
+    entries: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Default)]
+struct DerivedFindingsIndexDto {
+    #[serde(default)]
+    entries: Vec<DerivedFindingsIndexEntryDto>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct DerivedFindingsIndexEntryDto {
+    session_id: String,
+    findings_count: usize,
+    normalization_state: String,
+    created_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct DerivedFindingsSessionDto {
+    session_id: String,
+    review_mode: String,
+    target: String,
+    findings: Vec<FindingDto>,
 }
 
 impl From<Finding> for FindingDto {

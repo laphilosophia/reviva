@@ -84,11 +84,14 @@ fn markdown_export_snapshot() {
 PROMPT
 ```
 
-## Raw Response
+## Parsed Response
 
 ```text
-{"content":"ok"}
+SUMMARY:
+- ok
 ```
+
+- Raw Body Bytes (stored in session): `16`
 
 ## Findings
 
@@ -113,6 +116,11 @@ fn json_export_is_valid_and_contains_fields() {
     let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid json");
     assert_eq!(parsed["session"]["id"], "session-123");
     assert_eq!(parsed["session"]["profile"]["name"], "launch-readiness");
+    assert_eq!(
+        parsed["session"]["response"]["response_interpretation"]["kind"],
+        "completed"
+    );
+    assert!(parsed["session"]["response"]["raw_http_body"].is_null());
     assert_eq!(parsed["findings"][0]["normalization_state"], "structured");
     assert_eq!(parsed["findings"][0]["severity_origin"], "model_labeled");
 }

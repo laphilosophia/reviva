@@ -5,11 +5,14 @@ use reviva_core::{
 };
 use reviva_export::{export_session_json, export_session_markdown};
 use reviva_prompts::{
-    apply_prompt_wrapper, build_prompt, normalize_findings_with_reasons, parse_prompt_wrapper,
-    parse_review_profile_toml, resolve_built_in_review_profile, PromptBuildConfig, PromptFile,
-    PromptWrapper, ReviewProfileSpec,
+    apply_prompt_wrapper, build_prompt, normalize_findings_for_profile_with_reasons,
+    parse_prompt_wrapper, parse_review_profile_toml, resolve_built_in_review_profile,
+    PromptBuildConfig, PromptFile, PromptWrapper, ReviewProfileSpec,
 };
-use reviva_repo::{estimated_target_tokens, load_target_files, scan_repository, RepoScanConfig};
+use reviva_repo::{
+    estimated_target_tokens, load_incremental_target_files, load_target_files,
+    resolve_incremental_target, scan_repository, RepoScanConfig,
+};
 use reviva_storage::{AppConfig, Storage};
 use std::env;
 use std::fs;
@@ -83,12 +86,15 @@ fn cmd_review(args: &[String]) -> Result<(), String> {
     let profile_file = parse_optional_arg(args, "--profile-file");
     let note = parse_optional_arg(args, "--note");
     let model = parse_optional_arg(args, "--model");
+    let max_findings_override = parse_optional_arg(args, "--max-findings");
+    let max_output_tokens_override = parse_optional_arg(args, "--max-output-tokens");
     let prompt_wrapper_arg = parse_optional_arg(args, "--prompt-wrapper");
     let kv_cache_arg = parse_optional_arg(args, "--kv-cache");
     let kv_slot_arg = parse_optional_arg(args, "--kv-slot");
     let llama_lifecycle_arg = parse_optional_arg(args, "--llama-lifecycle");
     let llama_model_path = parse_optional_arg(args, "--llama-model-path");
     let llama_server_path = parse_optional_arg(args, "--llama-server-path");
+    let incremental_from = parse_optional_arg(args, "--incremental-from");
     let preview_only = has_flag(args, "--preview-only");
     let files = parse_repeat_arg(args, "--file");
     let boundary_left = parse_optional_arg(args, "--boundary-left");
@@ -128,26 +134,71 @@ fn cmd_review(args: &[String]) -> Result<(), String> {
             .save_config(&config)
             .map_err(|error| error.to_string())?;
     }
-    let resolved_profile = resolve_review_profile(
+    let mut resolved_profile = resolve_review_profile(
         &repo,
         profile.as_deref(),
         profile_file.as_deref(),
         config.review_profile.as_deref(),
         config.review_profile_file.as_deref(),
     )?;
+    let mut profile_overridden = false;
+    if let Some(value) = max_findings_override {
+        let parsed = parse_positive_usize(&value, "--max-findings")?;
+        resolved_profile.spec.limits.max_findings = Some(parsed);
+        profile_overridden = true;
+    }
+    if let Some(value) = max_output_tokens_override {
+        let parsed = parse_positive_u32(&value, "--max-output-tokens")?;
+        resolved_profile.spec.limits.max_output_tokens = Some(parsed);
+        profile_overridden = true;
+    }
+    if profile_overridden {
+        resolved_profile.source.push_str("+cli_overrides");
+    }
+    resolved_profile.hash = fnv1a64_hex(&resolved_profile.spec.canonical_text());
     let (mode, mode_source) = resolve_review_mode(mode_arg.as_deref(), &resolved_profile.spec)?;
-    let target = resolve_target(&repo, args, files, boundary_left, boundary_right)?;
     let repo_config = RepoScanConfig {
         max_file_bytes: config.max_file_bytes,
         include_extensions: None,
     };
-    let loaded =
-        load_target_files(&repo, &target, &repo_config).map_err(|error| error.to_string())?;
+    let incremental_context_lines = 3_usize;
+    let target = resolve_target(
+        &repo,
+        args,
+        files,
+        boundary_left,
+        boundary_right,
+        incremental_from.as_deref(),
+        &repo_config,
+    )?;
+    let (loaded, incremental_fallback_full_files) = if let Some(from) = incremental_from.as_deref()
+    {
+        let result = load_incremental_target_files(
+            &repo,
+            &target,
+            &repo_config,
+            from,
+            incremental_context_lines,
+        )
+        .map_err(|error| error.to_string())?;
+        (result.files, result.fallback_full_files)
+    } else {
+        (
+            load_target_files(&repo, &target, &repo_config).map_err(|error| error.to_string())?,
+            Vec::new(),
+        )
+    };
 
     for file in &loaded {
         if let Some(suspicion) = &file.suspicion {
             eprintln!("warning: {} may be {}", file.path, suspicion.as_str());
         }
+    }
+    for path in &incremental_fallback_full_files {
+        eprintln!(
+            "warning: incremental diff empty for {}, fallback to full-file content",
+            path
+        );
     }
 
     let prompt_files = loaded
@@ -186,11 +237,17 @@ fn cmd_review(args: &[String]) -> Result<(), String> {
         return Ok(());
     }
 
+    let effective_max_tokens = resolved_profile
+        .spec
+        .limits
+        .max_output_tokens
+        .map(|limit| limit.min(config.max_tokens))
+        .unwrap_or(config.max_tokens);
     let backend_settings = BackendSettings {
         base_url: config.backend_url.clone(),
         model: model.or_else(|| config.model.clone()),
         temperature: config.temperature,
-        max_tokens: config.max_tokens,
+        max_tokens: effective_max_tokens,
         timeout_ms: config.timeout_ms,
         stop_sequences: config.stop_sequences.clone(),
         cache_prompt: kv_cache_enabled,
@@ -209,7 +266,7 @@ fn cmd_review(args: &[String]) -> Result<(), String> {
         }
     };
     let mut review_cache_source = None::<String>;
-    let (response, llama_server_action, llama_server_guard) =
+    let (response, llama_server_action, llama_health_probe, llama_server_guard) =
         if let Some(cache_session_id) = cached_session_id {
             match storage.load_session(&cache_session_id) {
                 Ok(cached_session) => {
@@ -220,6 +277,7 @@ fn cmd_review(args: &[String]) -> Result<(), String> {
                     (
                         cached_session.response,
                         LlamaServerAction::CacheHitBackendSkipped,
+                        None,
                         LlamaServerGuard::noop(),
                     )
                 }
@@ -250,7 +308,8 @@ fn cmd_review(args: &[String]) -> Result<(), String> {
 
     let model_output = response_content_for_normalization(&response);
     let session_id = session_id();
-    let normalization_report = normalize_findings_with_reasons(
+    let normalization_report = normalize_findings_for_profile_with_reasons(
+        &resolved_profile.spec,
         &session_id,
         mode,
         &target.as_paths().join(","),
@@ -269,6 +328,10 @@ fn cmd_review(args: &[String]) -> Result<(), String> {
         format!("prompt_wrapper={}", prompt_wrapper.as_str()),
         format!("llama_lifecycle={}", llama_lifecycle.as_str()),
         format!("llama_server_action={}", llama_server_action.as_str()),
+        format!(
+            "llama_health_probe_paths={}",
+            backend_health_probe_paths().join(",")
+        ),
         format!(
             "review_cache={}",
             if review_cache_source.is_some() {
@@ -290,8 +353,37 @@ fn cmd_review(args: &[String]) -> Result<(), String> {
             estimated_target_tokens(&loaded, note.as_deref())
         ),
     ];
+    if let Some(probe) = llama_health_probe {
+        warnings.push(format!("llama_health_probe_path={}", probe.path));
+        warnings.push(format!("llama_health_probe_status={}", probe.status_code));
+    }
     if let Some(source) = &review_cache_source {
         warnings.push(format!("review_cache_source={source}"));
+    }
+    if let Some(max_findings) = resolved_profile.spec.limits.max_findings {
+        warnings.push(format!("profile_max_findings={max_findings}"));
+    }
+    if let Some(max_output_tokens) = resolved_profile.spec.limits.max_output_tokens {
+        warnings.push(format!("profile_max_output_tokens={max_output_tokens}"));
+        warnings.push(format!("effective_max_tokens={effective_max_tokens}"));
+    }
+    if let Some(base) = incremental_from.as_deref() {
+        warnings.push(format!("incremental_from={base}"));
+        warnings.push("incremental_scope=diff_hunks".to_string());
+        warnings.push(format!(
+            "incremental_context_lines={incremental_context_lines}"
+        ));
+        warnings.push(format!(
+            "incremental_file_count={}",
+            target.as_paths().len()
+        ));
+        warnings.push(format!(
+            "incremental_fallback_full_file_count={}",
+            incremental_fallback_full_files.len()
+        ));
+        for path in &incremental_fallback_full_files {
+            warnings.push(format!("incremental_fallback_full_file={path}"));
+        }
     }
     for reason in normalization_report.reason_tags {
         warnings.push(format!("normalization_reason={reason}"));
@@ -299,7 +391,7 @@ fn cmd_review(args: &[String]) -> Result<(), String> {
 
     let session = Session {
         id: session_id.clone(),
-        repository_root: repo.display().to_string(),
+        repository_root: normalize_path_for_session(&repo),
         review_mode: mode,
         selected_target: target,
         prompt_preview: wrapped_prompt.clone(),
@@ -474,7 +566,17 @@ fn resolve_target(
     files: Vec<String>,
     boundary_left: Option<String>,
     boundary_right: Option<String>,
+    incremental_from: Option<&str>,
+    repo_config: &RepoScanConfig,
 ) -> Result<RevivaTarget, String> {
+    if incremental_from.is_some()
+        && (!files.is_empty() || boundary_left.is_some() || boundary_right.is_some())
+    {
+        return Err(
+            "cannot combine --incremental-from with --file or --boundary-left/--boundary-right"
+                .to_string(),
+        );
+    }
     if let (Some(left), Some(right)) = (boundary_left, boundary_right) {
         return Ok(RevivaTarget::Boundary(BoundaryTarget { left, right }));
     }
@@ -485,10 +587,14 @@ fn resolve_target(
             Ok(RevivaTarget::Set(files))
         };
     }
+    if let Some(from) = incremental_from {
+        return resolve_incremental_target(repo, from, repo_config)
+            .map_err(|error| error.to_string());
+    }
 
     if !io::stdin().is_terminal() {
         return Err(
-            "no explicit target provided. Use --file (or --boundary-left/--boundary-right) in non-interactive shells."
+            "no explicit target provided. Use --file, --boundary-left/--boundary-right, or --incremental-from in non-interactive shells."
                 .to_string(),
         );
     }
@@ -573,6 +679,12 @@ impl Drop for LlamaServerGuard {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct HealthProbeInfo {
+    path: &'static str,
+    status_code: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LlamaServerAction {
     PolicyManual,
     NonLocalBackendIgnored,
@@ -633,6 +745,7 @@ fn resolve_llama_lifecycle_policy(raw: Option<&str>) -> Result<LlamaLifecyclePol
 struct LlamaServerOutcome {
     guard: LlamaServerGuard,
     action: LlamaServerAction,
+    health_probe: Option<HealthProbeInfo>,
 }
 
 fn ensure_llama_server(
@@ -646,6 +759,7 @@ fn ensure_llama_server(
         return Ok(LlamaServerOutcome {
             guard: LlamaServerGuard::noop(),
             action: LlamaServerAction::PolicyManual,
+            health_probe: None,
         });
     }
 
@@ -658,23 +772,21 @@ fn ensure_llama_server(
         return Ok(LlamaServerOutcome {
             guard: LlamaServerGuard::noop(),
             action: LlamaServerAction::NonLocalBackendIgnored,
+            health_probe: None,
         });
     }
 
-    if llama_server_health(&backend.base_url) {
+    if let Some(health_probe) = probe_backend_health(&backend.base_url, Duration::from_millis(800))
+    {
         eprintln!("llama-server: active");
         return Ok(LlamaServerOutcome {
             guard: LlamaServerGuard::noop(),
             action: LlamaServerAction::ReusedActiveServer,
+            health_probe: Some(health_probe),
         });
     }
 
-    let server_bin = config
-        .llama_server_path
-        .as_deref()
-        .unwrap_or("llama-server")
-        .to_string();
-    assert_llama_server_installed(&server_bin)?;
+    let server_bin = resolve_llama_server_binary(config.llama_server_path.as_deref())?;
 
     let model_path = resolve_llama_model_path(storage, config)?;
     let (host, port) = parse_http_host_port(&backend.base_url)?;
@@ -685,7 +797,7 @@ fn ensure_llama_server(
         port,
         backend.model.as_deref(),
     )?;
-    wait_for_llama_server_ready(
+    let health_probe = wait_for_llama_server_ready(
         &backend.base_url,
         &mut child,
         Duration::from_secs(90),
@@ -697,11 +809,13 @@ fn ensure_llama_server(
         return Ok(LlamaServerOutcome {
             guard: LlamaServerGuard::noop(),
             action: LlamaServerAction::StartedKeepRunning,
+            health_probe: Some(health_probe),
         });
     }
     Ok(LlamaServerOutcome {
         guard: LlamaServerGuard::started(child),
         action: LlamaServerAction::StartedAndStopOnExit,
+        health_probe: Some(health_probe),
     })
 }
 
@@ -711,7 +825,15 @@ fn execute_backend_review(
     backend_settings: &BackendSettings,
     policy: LlamaLifecyclePolicy,
     request: &RevivaRequest,
-) -> Result<(RevivaResponse, LlamaServerAction, LlamaServerGuard), String> {
+) -> Result<
+    (
+        RevivaResponse,
+        LlamaServerAction,
+        Option<HealthProbeInfo>,
+        LlamaServerGuard,
+    ),
+    String,
+> {
     let llama_server_outcome = ensure_llama_server(storage, config, backend_settings, policy)
         .map_err(|error| format!("llama-server preflight failed: {error}"))?;
     let backend = LlamaCompletionBackend::new();
@@ -721,6 +843,7 @@ fn execute_backend_review(
     Ok((
         response,
         llama_server_outcome.action,
+        llama_server_outcome.health_probe,
         llama_server_outcome.guard,
     ))
 }
@@ -730,7 +853,28 @@ fn should_manage_llama_server(base_url: &str) -> bool {
     normalized == "http://127.0.0.1:8080" || normalized == "http://localhost:8080"
 }
 
-fn assert_llama_server_installed(server_bin: &str) -> Result<(), String> {
+fn resolve_llama_server_binary(configured: Option<&str>) -> Result<String, String> {
+    if let Some(server_bin) = configured {
+        return ensure_llama_server_invokable(server_bin).map(|_| server_bin.to_string());
+    }
+
+    if ensure_llama_server_invokable("llama-server").is_ok() {
+        return Ok("llama-server".to_string());
+    }
+
+    for candidate in discover_llama_server_fallback_candidates() {
+        if ensure_llama_server_invokable(&candidate).is_ok() {
+            return Ok(candidate);
+        }
+    }
+
+    Err(
+        "llama-server bulunamadı veya çalıştırılamadı. Kurulum yap (`winget install ggml.llamacpp`) veya `.reviva/config.toml` içine `llama_server_path` ver."
+            .to_string(),
+    )
+}
+
+fn ensure_llama_server_invokable(server_bin: &str) -> Result<(), String> {
     let result = Command::new(server_bin)
         .arg("--version")
         .stdout(Stdio::null())
@@ -738,12 +882,54 @@ fn assert_llama_server_installed(server_bin: &str) -> Result<(), String> {
         .status();
     match result {
         Ok(_) => Ok(()),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Err(
-            "llama-server bulunamadı. Kurulum yap ve PATH'e ekle (örn. `winget install ggml.llamacpp`)."
-                .to_string(),
-        ),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            Err(format!("llama-server binary not found: {server_bin}"))
+        }
+        Err(error) if error.kind() == io::ErrorKind::PermissionDenied => Err(format!(
+            "llama-server binary is not executable: {server_bin} ({error})"
+        )),
         Err(error) => Err(format!("llama-server kontrolü başarısız: {error}")),
     }
+}
+
+fn discover_llama_server_fallback_candidates() -> Vec<String> {
+    let mut candidates = Vec::<String>::new();
+
+    if cfg!(windows) {
+        if let Ok(output) = Command::new("where")
+            .arg("llama-server")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .output()
+        {
+            for line in String::from_utf8_lossy(&output.stdout).lines() {
+                let trimmed = line.trim();
+                if !trimmed.is_empty() {
+                    candidates.push(trimmed.to_string());
+                }
+            }
+        }
+
+        if let Some(local_app_data) = env::var_os("LOCALAPPDATA") {
+            let packages_dir = PathBuf::from(local_app_data)
+                .join("Microsoft")
+                .join("WinGet")
+                .join("Packages");
+            if let Ok(entries) = fs::read_dir(packages_dir) {
+                for entry in entries.flatten() {
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    if name.starts_with("ggml.llamacpp_") {
+                        let candidate = entry.path().join("llama-server.exe");
+                        if candidate.exists() {
+                            candidates.push(candidate.to_string_lossy().to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    candidates
 }
 
 fn resolve_llama_model_path(storage: &Storage, config: &mut AppConfig) -> Result<String, String> {
@@ -866,11 +1052,11 @@ fn wait_for_llama_server_ready(
     child: &mut Child,
     timeout: Duration,
     model_path: &str,
-) -> Result<(), String> {
+) -> Result<HealthProbeInfo, String> {
     let start = SystemTime::now();
     loop {
-        if llama_server_health(base_url) {
-            return Ok(());
+        if let Some(health_probe) = probe_backend_health(base_url, Duration::from_millis(800)) {
+            return Ok(health_probe);
         }
         match child.try_wait() {
             Ok(Some(status)) => {
@@ -888,24 +1074,38 @@ fn wait_for_llama_server_ready(
         let elapsed = SystemTime::now().duration_since(start).unwrap_or_default();
         if elapsed >= timeout {
             return Err(format!(
-                "llama-server not ready after {:?}. Check model path, port collisions, and permissions. backend_url={} model_path={}",
-                timeout, base_url, model_path
+                "llama-server not ready after {:?}. Check model path, port collisions, permissions, and health endpoints ({}). backend_url={} model_path={}",
+                timeout,
+                backend_health_probe_paths().join(","),
+                base_url,
+                model_path
             ));
         }
         thread::sleep(Duration::from_millis(500));
     }
 }
 
-fn llama_server_health(base_url: &str) -> bool {
+fn probe_backend_health(base_url: &str, timeout: Duration) -> Option<HealthProbeInfo> {
     let (host, port) = match parse_http_host_port(base_url) {
         Ok(value) => value,
-        Err(_) => return false,
+        Err(_) => return None,
     };
-    let timeout = Duration::from_millis(800);
-    if let Some(status_code) = http_status_probe(&host, port, "/health", timeout) {
-        return (200..300).contains(&status_code);
+    for path in backend_health_probe_paths() {
+        if let Some(status_code) = http_status_probe(&host, port, path, timeout) {
+            if is_healthy_status_code(status_code) {
+                return Some(HealthProbeInfo { path, status_code });
+            }
+        }
     }
-    false
+    None
+}
+
+fn backend_health_probe_paths() -> &'static [&'static str] {
+    &["/health", "/v1/models", "/"]
+}
+
+fn is_healthy_status_code(status_code: u16) -> bool {
+    (200..300).contains(&status_code) || status_code == 401 || status_code == 403
 }
 
 fn http_status_probe(host: &str, port: u16, path: &str, timeout: Duration) -> Option<u16> {
@@ -991,6 +1191,28 @@ fn parse_kv_slot_id(raw: &str) -> Result<u32, String> {
         .map_err(|error| format!("invalid --kv-slot value '{raw}': {error}"))
 }
 
+fn parse_positive_usize(raw: &str, flag: &str) -> Result<usize, String> {
+    let parsed = raw
+        .trim()
+        .parse::<usize>()
+        .map_err(|error| format!("invalid {flag} value '{raw}': {error}"))?;
+    if parsed == 0 {
+        return Err(format!("{flag} must be greater than zero"));
+    }
+    Ok(parsed)
+}
+
+fn parse_positive_u32(raw: &str, flag: &str) -> Result<u32, String> {
+    let parsed = raw
+        .trim()
+        .parse::<u32>()
+        .map_err(|error| format!("invalid {flag} value '{raw}': {error}"))?;
+    if parsed == 0 {
+        return Err(format!("{flag} must be greater than zero"));
+    }
+    Ok(parsed)
+}
+
 struct ResolvedProfile {
     spec: ReviewProfileSpec,
     source: String,
@@ -1011,6 +1233,7 @@ fn resolve_review_profile(
             fs::read_to_string(&profile_path).map_err(|error| error.to_string())?;
         let profile_spec =
             parse_review_profile_toml(&profile_content).map_err(|error| error.to_string())?;
+        let profile_hash = fnv1a64_hex(&profile_spec.canonical_text());
         let source = if profile_file_arg.is_some() {
             "cli_profile_file"
         } else {
@@ -1019,8 +1242,8 @@ fn resolve_review_profile(
         return Ok(ResolvedProfile {
             spec: profile_spec,
             source: source.to_string(),
-            path: Some(profile_path.to_string_lossy().to_string()),
-            hash: fnv1a64_hex(&profile_content),
+            path: Some(path_for_profile_metadata(repo, &profile_path)),
+            hash: profile_hash,
         });
     }
 
@@ -1058,6 +1281,13 @@ fn resolve_profile_path(repo: &Path, path_value: &str) -> Result<PathBuf, String
     }
     path.canonicalize()
         .map_err(|error| format!("cannot resolve profile file path: {error}"))
+}
+
+fn path_for_profile_metadata(repo: &Path, profile_path: &Path) -> String {
+    if let Ok(relative) = profile_path.strip_prefix(repo) {
+        return normalize_path_for_session(relative);
+    }
+    normalize_path_for_session(profile_path)
 }
 
 fn fnv1a64_hex(value: &str) -> String {
@@ -1108,6 +1338,10 @@ fn build_review_cache_key(request: &RevivaRequest) -> String {
     material.push_str("\nprompt=\n");
     material.push_str(&request.prompt);
     fnv1a64_hex(&material)
+}
+
+fn normalize_path_for_session(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
 }
 
 fn parse_required_arg(args: &[String], flag: &str) -> Result<String, String> {
@@ -1161,7 +1395,7 @@ fn session_id() -> String {
 
 fn print_usage() {
     println!("reviva scan [--repo PATH]");
-    println!("reviva review --repo PATH [--mode MODE] [--profile NAME] [--profile-file PATH] [--file PATH]... [--boundary-left PATH --boundary-right PATH] [--note TEXT] [--prompt-wrapper plain|qwen-chatml] [--kv-cache on|off] [--kv-slot SLOT_ID] [--llama-lifecycle manual|ensure-running|ensure-running-and-stop] [--preview-only] [--llama-model-path PATH_OR_DIR] [--llama-server-path PATH]");
+    println!("reviva review --repo PATH [--mode MODE] [--profile NAME] [--profile-file PATH] [--max-findings N] [--max-output-tokens N] [--file PATH]... [--boundary-left PATH --boundary-right PATH] [--incremental-from GIT_REF] [--note TEXT] [--prompt-wrapper plain|qwen-chatml] [--kv-cache on|off] [--kv-slot SLOT_ID] [--llama-lifecycle manual|ensure-running|ensure-running-and-stop] [--preview-only] [--llama-model-path PATH_OR_DIR] [--llama-server-path PATH]");
     println!("reviva set save --repo PATH --name NAME --file PATH...");
     println!("reviva set load --repo PATH --name NAME");
     println!("reviva set list --repo PATH");
@@ -1169,4 +1403,34 @@ fn print_usage() {
     println!("reviva session show --repo PATH --id SESSION_ID");
     println!("reviva findings list --repo PATH [--session SESSION_ID]");
     println!("reviva export --repo PATH --session SESSION_ID [--format md|json] [--output PATH]");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{backend_health_probe_paths, is_healthy_status_code, parse_http_host_port};
+
+    #[test]
+    fn health_probe_paths_are_stable() {
+        assert_eq!(
+            backend_health_probe_paths(),
+            &["/health", "/v1/models", "/"]
+        );
+    }
+
+    #[test]
+    fn healthy_status_code_rule_is_explicit() {
+        assert!(is_healthy_status_code(200));
+        assert!(is_healthy_status_code(204));
+        assert!(is_healthy_status_code(401));
+        assert!(is_healthy_status_code(403));
+        assert!(!is_healthy_status_code(404));
+        assert!(!is_healthy_status_code(500));
+    }
+
+    #[test]
+    fn parse_http_host_port_rejects_non_http() {
+        let error = parse_http_host_port("https://127.0.0.1:8080")
+            .expect_err("https should be rejected for llama-server management");
+        assert!(error.contains("sadece http backend"));
+    }
 }

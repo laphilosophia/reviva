@@ -132,6 +132,10 @@ fn end_to_end_cli_flow_and_prompt_inspectability() {
     let session_json = fs::read_to_string(&session_json_path).expect("session json");
     let parsed: Value = serde_json::from_str(&session_json).expect("valid session json");
     assert_eq!(parsed["prompt_preview"], parsed["prompt_sent"]);
+    assert!(!parsed["repository_root"]
+        .as_str()
+        .unwrap_or_default()
+        .contains('\\'));
     let warnings = parsed["warnings"].as_array().expect("warnings array");
     assert!(warnings
         .iter()
@@ -527,10 +531,10 @@ risk_classes = ["correctness", "security", "operator-trust"]
     assert_eq!(parsed["profile"]["name"], "tracehound-launch");
     assert_eq!(parsed["profile"]["source"], "cli_profile_file");
     assert_eq!(parsed["prompt_preview"], parsed["prompt_sent"]);
-    assert!(parsed["profile"]["path"]
-        .as_str()
-        .expect("profile path")
-        .contains("review-profile.toml"));
+    assert_eq!(
+        parsed["profile"]["path"].as_str().expect("profile path"),
+        "review-profile.toml"
+    );
 }
 
 #[test]
@@ -595,4 +599,254 @@ fn normalization_reason_tags_are_persisted_when_raw_only() {
     assert!(warnings
         .iter()
         .any(|value| value.as_str() == Some("normalization_reason=missing_findings_section")));
+}
+
+#[test]
+fn review_incremental_from_git_ref_selects_changed_files() {
+    let temp = TempDir::new().expect("tempdir");
+    init_git_repo(temp.path());
+    fs::create_dir_all(temp.path().join("src")).expect("mkdir");
+    fs::write(
+        temp.path().join("src/main.rs"),
+        "fn main() { println!(\"hello\"); }\n",
+    )
+    .expect("write");
+    git(temp.path(), &["add", "."]);
+    git(temp.path(), &["commit", "-m", "initial"]);
+    fs::write(
+        temp.path().join("src/main.rs"),
+        "fn main() { println!(\"changed\"); }\n",
+    )
+    .expect("write");
+
+    let server = MockServer::start();
+    let completion = server.mock(|when, then| {
+        when.method(POST).path("/completion");
+        then.status(200).header("content-type", "application/json").body(
+            r#"{
+                "content": "SUMMARY:\n- ok\nFINDINGS:\n- summary: Incremental finding\nseverity: medium\nconfidence: high\nlocation: src/main.rs\nevidence: changed line\nwhy: behavior changed\naction: verify\n"
+            }"#,
+        );
+    });
+
+    fs::create_dir_all(temp.path().join(".reviva")).expect("mkdir");
+    fs::write(
+        temp.path().join(".reviva/config.toml"),
+        format!(
+            "backend_url = \"{}\"\nmodel = \"test\"\ntimeout_ms = 10000\nmax_tokens = 512\ntemperature = 0.1\nstop_sequences = []\nmax_file_bytes = 262144\nestimated_prompt_tokens = 16000\n",
+            server.url("")
+        ),
+    )
+    .expect("config");
+
+    let review_output = Command::new(env!("CARGO_BIN_EXE_reviva"))
+        .args([
+            "review",
+            "--repo",
+            temp.path().to_str().expect("repo str"),
+            "--mode",
+            "contract",
+            "--incremental-from",
+            "HEAD",
+        ])
+        .env("REVIVA_TEST_SESSION_ID", "session-incremental")
+        .env("REVIVA_TEST_TIMESTAMP", "1700000002")
+        .current_dir(temp.path())
+        .output()
+        .expect("run review");
+    assert!(
+        review_output.status.success(),
+        "review failed stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&review_output.stdout),
+        String::from_utf8_lossy(&review_output.stderr)
+    );
+    assert_eq!(completion.hits(), 1);
+
+    let session_json_path = temp
+        .path()
+        .join(".reviva")
+        .join("sessions")
+        .join("session-incremental.json");
+    let session_json = fs::read_to_string(&session_json_path).expect("session json");
+    let parsed: Value = serde_json::from_str(&session_json).expect("valid session json");
+    assert_eq!(parsed["selected_target"]["kind"], "single");
+    assert_eq!(parsed["selected_target"]["path"], "src/main.rs");
+    assert!(parsed["prompt_preview"]
+        .as_str()
+        .expect("prompt preview")
+        .contains("REVIVA INCREMENTAL DIFF"));
+    assert!(parsed["prompt_preview"]
+        .as_str()
+        .expect("prompt preview")
+        .contains("@@"));
+    let warnings = parsed["warnings"].as_array().expect("warnings array");
+    assert!(warnings
+        .iter()
+        .any(|value| value.as_str() == Some("incremental_from=HEAD")));
+    assert!(warnings
+        .iter()
+        .any(|value| value.as_str() == Some("incremental_file_count=1")));
+    assert!(warnings
+        .iter()
+        .any(|value| value.as_str() == Some("incremental_scope=diff_hunks")));
+    assert!(warnings
+        .iter()
+        .any(|value| value.as_str() == Some("incremental_context_lines=3")));
+    assert!(warnings
+        .iter()
+        .any(|value| value.as_str() == Some("incremental_fallback_full_file_count=0")));
+}
+
+#[test]
+fn incremental_from_rejects_explicit_file_combination() {
+    let temp = TempDir::new().expect("tempdir");
+    init_git_repo(temp.path());
+    fs::create_dir_all(temp.path().join("src")).expect("mkdir");
+    fs::write(
+        temp.path().join("src/main.rs"),
+        "fn main() { println!(\"hello\"); }\n",
+    )
+    .expect("write");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_reviva"))
+        .args([
+            "review",
+            "--repo",
+            temp.path().to_str().expect("repo str"),
+            "--mode",
+            "contract",
+            "--file",
+            "src/main.rs",
+            "--incremental-from",
+            "HEAD",
+        ])
+        .current_dir(temp.path())
+        .output()
+        .expect("run review");
+    assert!(
+        !output.status.success(),
+        "command must fail when incremental and explicit file are combined"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains(
+        "cannot combine --incremental-from with --file or --boundary-left/--boundary-right"
+    ));
+}
+
+#[test]
+fn profile_limits_and_cli_overrides_affect_backend_and_findings() {
+    let temp = TempDir::new().expect("tempdir");
+    fs::create_dir_all(temp.path().join("src")).expect("mkdir");
+    fs::write(
+        temp.path().join("src/main.rs"),
+        "fn main() { println!(\"hello\"); }\n",
+    )
+    .expect("write");
+
+    let server = MockServer::start();
+    server.mock(|when, then| {
+        when.method(POST).path("/completion");
+        then.status(200).header("content-type", "application/json").body(
+            r#"{
+                "content": "SUMMARY:\n- ok\nFINDINGS:\n- summary: First\nseverity: high\nconfidence: high\nlocation: src/main.rs\nevidence: a\nwhy: a\naction: a\n- summary: Second\nseverity: medium\nconfidence: medium\nlocation: src/main.rs\nevidence: b\nwhy: b\naction: b\n"
+            }"#,
+        );
+    });
+
+    fs::create_dir_all(temp.path().join(".reviva")).expect("mkdir");
+    fs::write(
+        temp.path().join(".reviva/config.toml"),
+        format!(
+            "backend_url = \"{}\"\nmodel = \"test\"\ntimeout_ms = 10000\nmax_tokens = 512\ntemperature = 0.1\nstop_sequences = []\nmax_file_bytes = 262144\nestimated_prompt_tokens = 16000\n",
+            server.url("")
+        ),
+    )
+    .expect("config");
+    fs::write(
+        temp.path().join("profile.toml"),
+        r#"
+name = "limited-profile"
+goal = "Limit output"
+severity_scale = ["critical", "high", "medium", "low", "unknown"]
+confidence_scale = ["high", "medium", "low", "unknown"]
+risk_classes = ["correctness", "security", "unknown"]
+
+[limits]
+max_findings = 2
+max_output_tokens = 128
+"#,
+    )
+    .expect("profile");
+
+    let review_output = Command::new(env!("CARGO_BIN_EXE_reviva"))
+        .args([
+            "review",
+            "--repo",
+            temp.path().to_str().expect("repo str"),
+            "--mode",
+            "contract",
+            "--profile-file",
+            "profile.toml",
+            "--max-findings",
+            "1",
+            "--max-output-tokens",
+            "42",
+            "--file",
+            "src/main.rs",
+        ])
+        .env("REVIVA_TEST_SESSION_ID", "session-profile-limits")
+        .env("REVIVA_TEST_TIMESTAMP", "1700000003")
+        .current_dir(temp.path())
+        .output()
+        .expect("run review");
+    assert!(
+        review_output.status.success(),
+        "review failed stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&review_output.stdout),
+        String::from_utf8_lossy(&review_output.stderr)
+    );
+
+    let session_json_path = temp
+        .path()
+        .join(".reviva")
+        .join("sessions")
+        .join("session-profile-limits.json");
+    let session_json = fs::read_to_string(&session_json_path).expect("session json");
+    let parsed: Value = serde_json::from_str(&session_json).expect("valid session json");
+    assert_eq!(parsed["backend"]["max_tokens"], 42);
+    assert_eq!(parsed["findings"].as_array().expect("findings").len(), 1);
+    let warnings = parsed["warnings"].as_array().expect("warnings array");
+    assert!(warnings
+        .iter()
+        .any(|value| value.as_str() == Some("profile_max_findings=1")));
+    assert!(warnings
+        .iter()
+        .any(|value| value.as_str() == Some("profile_max_output_tokens=42")));
+    assert!(warnings
+        .iter()
+        .any(|value| value.as_str() == Some("effective_max_tokens=42")));
+    assert!(warnings
+        .iter()
+        .any(|value| value.as_str() == Some("normalization_reason=max_findings_truncated")));
+}
+
+fn init_git_repo(root: &Path) {
+    git(root, &["init"]);
+    git(root, &["config", "user.email", "reviva@example.com"]);
+    git(root, &["config", "user.name", "reviva-test"]);
+}
+
+fn git(root: &Path, args: &[&str]) {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(root)
+        .output()
+        .expect("run git");
+    assert!(
+        output.status.success(),
+        "git {:?} failed stdout:\n{}\nstderr:\n{}",
+        args,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }

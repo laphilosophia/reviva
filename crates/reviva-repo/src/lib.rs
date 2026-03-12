@@ -3,8 +3,10 @@ use reviva_core::RevivaTarget;
 use std::collections::HashSet;
 use std::fmt;
 use std::fs;
+use std::io;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FileSuspicion {
@@ -60,6 +62,12 @@ pub struct LoadedFile {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IncrementalLoadResult {
+    pub files: Vec<LoadedFile>,
+    pub fallback_full_files: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RepoError {
     Io(String),
     FileTooLarge {
@@ -75,6 +83,14 @@ pub enum RepoError {
     },
     PathOutsideRoot {
         path: String,
+    },
+    GitUnavailable,
+    GitDiffFailed {
+        from: String,
+        message: String,
+    },
+    NoReviewableChangedFiles {
+        from: String,
     },
 }
 
@@ -97,6 +113,18 @@ impl fmt::Display for RepoError {
             Self::PathOutsideRoot { path } => {
                 write!(f, "path escapes repository root: {path}")
             }
+            Self::GitUnavailable => write!(
+                f,
+                "git command is not available in PATH; incremental mode requires git"
+            ),
+            Self::GitDiffFailed { from, message } => write!(
+                f,
+                "unable to resolve incremental target from git diff ({from}): {message}"
+            ),
+            Self::NoReviewableChangedFiles { from } => write!(
+                f,
+                "incremental mode found no reviewable changed files for base '{from}'"
+            ),
         }
     }
 }
@@ -339,6 +367,65 @@ pub fn load_target_files(
     Ok(files)
 }
 
+pub fn load_incremental_target_files(
+    root: &Path,
+    target: &RevivaTarget,
+    config: &RepoScanConfig,
+    from: &str,
+    context_lines: usize,
+) -> Result<IncrementalLoadResult, RepoError> {
+    let mut files = Vec::new();
+    let mut fallback_full_files = Vec::new();
+
+    for relative in target.as_paths() {
+        let absolute = resolve_target_path(root, relative)?;
+        if detect_binary(&absolute)? {
+            return Err(RepoError::BinaryFileRejected {
+                path: relative.to_string(),
+            });
+        }
+
+        let metadata = fs::metadata(&absolute).map_err(|error| RepoError::Io(error.to_string()))?;
+        let size_bytes = metadata.len() as usize;
+        if size_bytes > config.max_file_bytes {
+            return Err(RepoError::FileTooLarge {
+                path: relative.to_string(),
+                file_size: size_bytes,
+                max_file_bytes: config.max_file_bytes,
+            });
+        }
+
+        let bytes = fs::read(&absolute).map_err(|error| RepoError::Io(error.to_string()))?;
+        let full_content = String::from_utf8(bytes).map_err(|_| RepoError::NonUtf8File {
+            path: relative.to_string(),
+        })?;
+        let suspicion = detect_suspicion(relative, &full_content);
+
+        let content = match git_diff_patch_for_file(root, from, relative, context_lines)? {
+            Some(patch) => format!(
+                "<<< REVIVA INCREMENTAL DIFF (base={from}, context_lines={context_lines}) >>>\n{patch}\n<<< END REVIVA INCREMENTAL DIFF >>>\n"
+            ),
+            None => {
+                fallback_full_files.push(relative.to_string());
+                full_content
+            }
+        };
+
+        files.push(LoadedFile {
+            path: relative.to_string(),
+            estimated_tokens: estimate_tokens(&content),
+            size_bytes,
+            suspicion,
+            content,
+        });
+    }
+
+    Ok(IncrementalLoadResult {
+        files,
+        fallback_full_files,
+    })
+}
+
 pub fn estimated_target_tokens(files: &[LoadedFile], note: Option<&str>) -> usize {
     let note_tokens = note.map(estimate_tokens).unwrap_or(0);
     files
@@ -347,4 +434,118 @@ pub fn estimated_target_tokens(files: &[LoadedFile], note: Option<&str>) -> usiz
         .sum::<usize>()
         + note_tokens
         + 128
+}
+
+pub fn resolve_incremental_target(
+    root: &Path,
+    from: &str,
+    config: &RepoScanConfig,
+) -> Result<RevivaTarget, RepoError> {
+    let changed = changed_files_from_git_diff(root, from)?;
+    let scan = scan_repository(root, config)?;
+    let reviewable_paths = scan
+        .entries
+        .into_iter()
+        .map(|entry| entry.path)
+        .collect::<HashSet<_>>();
+
+    let mut selected = changed
+        .into_iter()
+        .filter(|path| reviewable_paths.contains(path))
+        .collect::<Vec<_>>();
+    selected.sort();
+    selected.dedup();
+
+    if selected.is_empty() {
+        return Err(RepoError::NoReviewableChangedFiles {
+            from: from.to_string(),
+        });
+    }
+
+    Ok(if selected.len() == 1 {
+        RevivaTarget::Single(selected[0].clone())
+    } else {
+        RevivaTarget::Set(selected)
+    })
+}
+
+fn changed_files_from_git_diff(root: &Path, from: &str) -> Result<Vec<String>, RepoError> {
+    let output = Command::new("git")
+        .arg("-c")
+        .arg("core.quotepath=false")
+        .arg("diff")
+        .arg("--name-only")
+        .arg("--diff-filter=ACMR")
+        .arg(from)
+        .arg("--")
+        .current_dir(root)
+        .output();
+
+    let output = match output {
+        Ok(value) => value,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Err(RepoError::GitUnavailable);
+        }
+        Err(error) => return Err(RepoError::Io(error.to_string())),
+    };
+
+    if !output.status.success() {
+        return Err(RepoError::GitDiffFailed {
+            from: from.to_string(),
+            message: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        });
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut files = Vec::new();
+    for line in stdout.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let normalized = normalize_path(Path::new(trimmed));
+        files.push(normalized);
+    }
+    Ok(files)
+}
+
+fn git_diff_patch_for_file(
+    root: &Path,
+    from: &str,
+    relative_path: &str,
+    context_lines: usize,
+) -> Result<Option<String>, RepoError> {
+    let output = Command::new("git")
+        .arg("-c")
+        .arg("core.quotepath=false")
+        .arg("diff")
+        .arg("--no-color")
+        .arg(format!("--unified={context_lines}"))
+        .arg(from)
+        .arg("--")
+        .arg(relative_path)
+        .current_dir(root)
+        .output();
+
+    let output = match output {
+        Ok(value) => value,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Err(RepoError::GitUnavailable);
+        }
+        Err(error) => return Err(RepoError::Io(error.to_string())),
+    };
+
+    if !output.status.success() {
+        return Err(RepoError::GitDiffFailed {
+            from: from.to_string(),
+            message: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        });
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let trimmed = stdout.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(trimmed.to_string()))
 }
