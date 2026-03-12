@@ -20,12 +20,9 @@ allow = [
     "Apache-2.0",
     "Apache-2.0 WITH LLVM-exception",
     "ISC",
-    "BSD-2-Clause",
     "BSD-3-Clause",
-    "Unicode-DFS-2016",
     "Unicode-3.0",
     "CDLA-Permissive-2.0",
-    "Zlib",
 ]
 # Confidence threshold for license detection (0.0–1.0).
 confidence-threshold = 0.8
