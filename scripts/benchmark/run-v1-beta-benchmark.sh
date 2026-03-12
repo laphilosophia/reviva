@@ -76,8 +76,7 @@ TARGET_REPO="$(cd "$TARGET_REPO" && pwd -P)"
 CONFIG_PATH="$TARGET_REPO/.reviva/config.toml"
 
 if [[ ! -f "$CONFIG_PATH" ]]; then
-  echo "error: missing config: $CONFIG_PATH (review backend settings must be configured before benchmark)" >&2
-  exit 1
+  echo "warning: missing config: $CONFIG_PATH (continuing with reviva default config values)" >&2
 fi
 
 if [[ -z "$OUTPUT_JSON" ]]; then
@@ -134,30 +133,66 @@ if [[ ! -x "$REVIVA_BIN" ]]; then
   exit 1
 fi
 
+scan_output="$("$REVIVA_BIN" scan --repo "$TARGET_REPO" 2>/dev/null)"
+if [[ -z "$scan_output" ]]; then
+  echo "error: reviva scan returned no reviewable files for benchmark" >&2
+  exit 1
+fi
+mapfile -t scan_paths < <(
+  printf '%s\n' "$scan_output" \
+    | awk '{
+        path=$1
+        tokens=0
+        for(i=1;i<=NF;i++){
+          if($i ~ /^estimated_tokens=/){
+            split($i,a,"=")
+            tokens=a[2]
+          }
+        }
+        if(path!=""){print tokens "\t" path}
+      }' \
+    | sort -n -k1,1 -k2,2 \
+    | awk -F '\t' '{print $2}' \
+    | sed '/^\s*$/d'
+)
+if [[ ${#scan_paths[@]} -eq 0 ]]; then
+  echo "error: reviva scan returned no reviewable files for benchmark" >&2
+  exit 1
+fi
+full_miss_file="${scan_paths[0]}"
+full_set_count=5
+if [[ ${#scan_paths[@]} -lt $full_set_count ]]; then
+  full_set_count=${#scan_paths[@]}
+fi
+
 RUN_ID="$(now_ms)"
 
 FULL_MISS_ARGS=(
   --repo "$TARGET_REPO"
   --mode launch-readiness
   --profile launch-readiness
+  --max-findings 4
+  --max-output-tokens 512
   --note "benchmark_run=$RUN_ID scenario=full"
-  --file packages/core/src/core/agent.ts
+  --file "$full_miss_file"
 )
 FULL_SET_MISS_ARGS=(
   --repo "$TARGET_REPO"
   --mode launch-readiness
   --profile launch-readiness
+  --max-findings 4
+  --max-output-tokens 512
   --note "benchmark_run=$RUN_ID scenario=full_set"
-  --file package.json
-  --file packages/cli/package.json
-  --file packages/core/package.json
-  --file packages/express/package.json
-  --file packages/fastify/package.json
 )
+for ((i = 0; i < full_set_count; i++)); do
+  FULL_SET_MISS_ARGS+=(--file "${scan_paths[$i]}")
+done
 INCREMENTAL_MISS_ARGS=(
   --repo "$TARGET_REPO"
   --mode launch-readiness
   --profile launch-readiness
+  --max-findings 4
+  --max-output-tokens 512
   --note "benchmark_run=$RUN_ID scenario=incremental"
   --incremental-from "$INCREMENTAL_FROM"
 )

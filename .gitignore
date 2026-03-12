@@ -17,6 +17,7 @@ mindfry_data/
 # Logs
 *.log
 npm-debug.log*
+.tmp-*
 
 # Coverage
 coverage/

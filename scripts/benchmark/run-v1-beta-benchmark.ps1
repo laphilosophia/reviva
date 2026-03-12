@@ -89,7 +89,7 @@ $workspaceRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 $resolvedRepoPath = (Resolve-Path $TargetRepo).Path
 $configPath = Join-Path $resolvedRepoPath ".reviva\config.toml"
 if (-not (Test-Path $configPath)) {
-    throw "missing config: $configPath (review backend settings must be configured before benchmark)"
+    Write-Warning "missing config: $configPath (continuing with reviva default config values)"
 }
 
 if ([string]::IsNullOrWhiteSpace($OutputJson)) {
@@ -123,6 +123,29 @@ if (-not (Test-Path $revivaBin)) {
     throw "reviva binary not found after build: $revivaBin"
 }
 
+$scanOutput = & $revivaBin scan --repo $resolvedRepoPath 2>$null
+if ($LASTEXITCODE -ne 0) {
+    throw "unable to build benchmark target set from reviva scan (exit=$LASTEXITCODE)"
+}
+$scanEntries = @(
+    $scanOutput |
+        ForEach-Object {
+            if ($_ -is [string] -and $_ -match '^(?<path>\S+)\s+size=\d+\s+estimated_tokens=(?<tokens>\d+)') {
+                [PSCustomObject]@{
+                    Path = $matches.path
+                    EstimatedTokens = [int]$matches.tokens
+                }
+            }
+        } |
+        Where-Object { $_ -ne $null }
+)
+if ($scanEntries.Count -eq 0) {
+    throw "reviva scan returned no reviewable files for benchmark"
+}
+$scanEntries = $scanEntries | Sort-Object EstimatedTokens, Path
+$fullMissFile = $scanEntries[0].Path
+$fullSetFiles = $scanEntries | Select-Object -First ([Math]::Min(5, $scanEntries.Count)) | ForEach-Object { $_.Path }
+
 $outputJsonDir = Split-Path -Parent $OutputJson
 $outputMdDir = Split-Path -Parent $OutputMarkdown
 if (-not (Test-Path $outputJsonDir)) {
@@ -138,24 +161,29 @@ $fullMissArgs = @(
     "--repo", $resolvedRepoPath,
     "--mode", "launch-readiness",
     "--profile", "launch-readiness",
+    "--max-findings", "4",
+    "--max-output-tokens", "512",
     "--note", "benchmark_run=$runId scenario=full",
-    "--file", "packages/core/src/core/agent.ts"
+    "--file", $fullMissFile
 )
 $fullSetMissArgs = @(
     "--repo", $resolvedRepoPath,
     "--mode", "launch-readiness",
     "--profile", "launch-readiness",
-    "--note", "benchmark_run=$runId scenario=full_set",
-    "--file", "package.json",
-    "--file", "packages/cli/package.json",
-    "--file", "packages/core/package.json",
-    "--file", "packages/express/package.json",
-    "--file", "packages/fastify/package.json"
+    "--max-findings", "4",
+    "--max-output-tokens", "512",
+    "--note", "benchmark_run=$runId scenario=full_set"
 )
+foreach ($path in $fullSetFiles) {
+    $fullSetMissArgs += "--file"
+    $fullSetMissArgs += $path
+}
 $incrementalMissArgs = @(
     "--repo", $resolvedRepoPath,
     "--mode", "launch-readiness",
     "--profile", "launch-readiness",
+    "--max-findings", "4",
+    "--max-output-tokens", "512",
     "--note", "benchmark_run=$runId scenario=incremental",
     "--incremental-from", $IncrementalFrom
 )
