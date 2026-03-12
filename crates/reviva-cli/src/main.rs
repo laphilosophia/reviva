@@ -14,6 +14,7 @@ use reviva_repo::{
     resolve_incremental_target, scan_repository, RepoScanConfig,
 };
 use reviva_storage::{AppConfig, Storage};
+use std::collections::BTreeMap;
 use std::env;
 use std::fs;
 use std::io::{self, IsTerminal, Read, Write};
@@ -482,21 +483,59 @@ fn cmd_session(args: &[String]) -> Result<(), String> {
             let session = storage
                 .load_session(&id)
                 .map_err(|error| error.to_string())?;
-            println!("id: {}", session.id);
-            println!("mode: {}", session.review_mode.as_str());
-            println!("target: {}", session.selected_target.as_paths().join(","));
-            println!("profile: {}", session.profile.name);
-            println!("profile_source: {}", session.profile.source);
-            println!("profile_hash: {}", session.profile.hash);
+            println!("session.id: {}", session.id);
+            println!("session.mode: {}", session.review_mode.as_str());
+            println!(
+                "session.target: {}",
+                session.selected_target.as_paths().join(",")
+            );
+            println!("session.profile: {}", session.profile.name);
+            println!("session.profile_source: {}", session.profile.source);
+            println!("session.profile_hash: {}", session.profile.hash);
             if let Some(path) = session.profile.path.as_deref() {
-                println!("profile_path: {path}");
+                println!("session.profile_path: {path}");
             }
-            println!("created_at: {}", session.created_at);
-            println!("findings: {}", session.findings.len());
+            println!("session.created_at: {}", session.created_at);
+            println!(
+                "response.status_code: {}",
+                format_status_code(session.response.status_code)
+            );
+            println!(
+                "response.interpretation: {}",
+                response_interpretation_kind(&session.response.response_interpretation)
+            );
+            let response_preview = response_preview(&session.response.response_interpretation, 180);
+            if !response_preview.is_empty() {
+                println!("response.preview: {response_preview}");
+            }
+            println!(
+                "response.raw_http_body_bytes: {}",
+                session.response.raw_http_body.len()
+            );
+            let (structured_count, partial_count, raw_only_count) =
+                summarize_normalization_states(&session.findings);
+            println!("findings.total: {}", session.findings.len());
+            println!("findings.structured: {structured_count}");
+            println!("findings.partial: {partial_count}");
+            println!("findings.raw_only: {raw_only_count}");
+            if !session.findings.is_empty() {
+                println!("findings.items:");
+                for finding in &session.findings {
+                    println!(
+                        "- {} [{}|{}|{}|{}] {}",
+                        finding.id,
+                        finding.normalization_state.as_str(),
+                        finding.severity_origin.as_str(),
+                        format_severity_label(finding.severity),
+                        finding.confidence.as_str(),
+                        format_finding_headline(finding),
+                    );
+                }
+            }
             if !session.warnings.is_empty() {
-                println!("warnings: {}", session.warnings.len());
+                println!("warnings.total: {}", session.warnings.len());
                 for warning in &session.warnings {
-                    println!("warning: {warning}");
+                    println!("warnings.item: {warning}");
                 }
             }
             Ok(())
@@ -507,22 +546,35 @@ fn cmd_session(args: &[String]) -> Result<(), String> {
 
 fn cmd_findings(args: &[String]) -> Result<(), String> {
     if args.is_empty() || args[0] != "list" {
-        return Err("findings requires: list [--session ID]".to_string());
+        return Err("findings requires: list [--session ID] [--triage]".to_string());
     }
     let repo = parse_repo_arg(args)?;
     let storage = Storage::new(&repo);
     let session_id = parse_optional_arg(args, "--session");
+    let triage = has_flag(args, "--triage");
     let findings = storage
         .list_findings(session_id.as_deref())
         .map_err(|error| error.to_string())?;
-    for finding in findings {
+    if findings.is_empty() {
+        println!("no findings");
+        return Ok(());
+    }
+    println!("id | state | origin | severity | confidence | risk | location | summary");
+    for finding in &findings {
         println!(
-            "{} | {} | {} | {}",
+            "{} | {} | {} | {} | {} | {} | {} | {}",
             finding.id,
             finding.normalization_state.as_str(),
             finding.severity_origin.as_str(),
+            format_severity_label(finding.severity),
+            finding.confidence.as_str(),
+            finding.risk_class.as_deref().unwrap_or("-"),
+            finding.location_hint.as_deref().unwrap_or("-"),
             finding.summary
         );
+    }
+    if triage {
+        print_findings_triage(&findings);
     }
     Ok(())
 }
@@ -1393,6 +1445,226 @@ fn session_id() -> String {
     format!("session-{now}")
 }
 
+fn format_status_code(status_code: Option<u16>) -> String {
+    status_code
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "none".to_string())
+}
+
+fn response_interpretation_kind(value: &ResponseInterpretation) -> &'static str {
+    match value {
+        ResponseInterpretation::Completed { .. } => "completed",
+        ResponseInterpretation::Empty => "empty",
+        ResponseInterpretation::Malformed { .. } => "malformed",
+    }
+}
+
+fn response_preview(value: &ResponseInterpretation, max_chars: usize) -> String {
+    let content = match value {
+        ResponseInterpretation::Completed { content } => content,
+        ResponseInterpretation::Malformed { reason } => reason,
+        ResponseInterpretation::Empty => return String::new(),
+    };
+    if content.is_empty() {
+        return String::new();
+    }
+    let single_line = content.replace(['\n', '\r'], " ");
+    if single_line.chars().count() <= max_chars {
+        return single_line;
+    }
+    let mut clipped = String::new();
+    for ch in single_line.chars().take(max_chars) {
+        clipped.push(ch);
+    }
+    clipped.push_str("...");
+    clipped
+}
+
+fn summarize_normalization_states(findings: &[reviva_core::Finding]) -> (usize, usize, usize) {
+    let mut structured = 0_usize;
+    let mut partial = 0_usize;
+    let mut raw_only = 0_usize;
+    for finding in findings {
+        match finding.normalization_state {
+            reviva_core::NormalizationState::Structured => structured += 1,
+            reviva_core::NormalizationState::Partial => partial += 1,
+            reviva_core::NormalizationState::RawOnly => raw_only += 1,
+        }
+    }
+    (structured, partial, raw_only)
+}
+
+fn format_severity_label(severity: Option<reviva_core::Severity>) -> &'static str {
+    match severity {
+        Some(value) => value.as_str(),
+        None => "unrated",
+    }
+}
+
+fn format_finding_headline(finding: &reviva_core::Finding) -> String {
+    let mut line = finding.summary.clone();
+    if let Some(location) = finding.location_hint.as_deref() {
+        line.push_str(" @ ");
+        line.push_str(location);
+    }
+    if let Some(risk_class) = finding.risk_class.as_deref() {
+        line.push_str(" [");
+        line.push_str(risk_class);
+        line.push(']');
+    }
+    line
+}
+
+fn print_findings_triage(findings: &[reviva_core::Finding]) {
+    println!();
+    println!("triage.total_findings: {}", findings.len());
+
+    let structured = findings
+        .iter()
+        .filter(|finding| {
+            finding.normalization_state == reviva_core::NormalizationState::Structured
+        })
+        .count();
+    let partial = findings
+        .iter()
+        .filter(|finding| finding.normalization_state == reviva_core::NormalizationState::Partial)
+        .count();
+    let raw_only = findings
+        .iter()
+        .filter(|finding| finding.normalization_state == reviva_core::NormalizationState::RawOnly)
+        .count();
+    println!(
+        "triage.by_state: structured={} partial={} raw_only={}",
+        structured, partial, raw_only
+    );
+
+    let model_labeled = findings
+        .iter()
+        .filter(|finding| finding.severity_origin == reviva_core::SeverityOrigin::ModelLabeled)
+        .count();
+    let normalized = findings
+        .iter()
+        .filter(|finding| finding.severity_origin == reviva_core::SeverityOrigin::Normalized)
+        .count();
+    let unrated = findings
+        .iter()
+        .filter(|finding| finding.severity_origin == reviva_core::SeverityOrigin::Unrated)
+        .count();
+    println!(
+        "triage.by_origin: model_labeled={} normalized={} unrated={}",
+        model_labeled, normalized, unrated
+    );
+
+    let critical = findings
+        .iter()
+        .filter(|finding| finding.severity == Some(reviva_core::Severity::Critical))
+        .count();
+    let high = findings
+        .iter()
+        .filter(|finding| finding.severity == Some(reviva_core::Severity::High))
+        .count();
+    let medium = findings
+        .iter()
+        .filter(|finding| finding.severity == Some(reviva_core::Severity::Medium))
+        .count();
+    let low = findings
+        .iter()
+        .filter(|finding| finding.severity == Some(reviva_core::Severity::Low))
+        .count();
+    let severity_unrated = findings
+        .iter()
+        .filter(|finding| finding.severity.is_none())
+        .count();
+    println!(
+        "triage.by_severity: critical={} high={} medium={} low={} unrated={}",
+        critical, high, medium, low, severity_unrated
+    );
+
+    let confidence_high = findings
+        .iter()
+        .filter(|finding| finding.confidence == reviva_core::Confidence::High)
+        .count();
+    let confidence_medium = findings
+        .iter()
+        .filter(|finding| finding.confidence == reviva_core::Confidence::Medium)
+        .count();
+    let confidence_low = findings
+        .iter()
+        .filter(|finding| finding.confidence == reviva_core::Confidence::Low)
+        .count();
+    let confidence_unknown = findings
+        .iter()
+        .filter(|finding| finding.confidence == reviva_core::Confidence::Unknown)
+        .count();
+    println!(
+        "triage.by_confidence: high={} medium={} low={} unknown={}",
+        confidence_high, confidence_medium, confidence_low, confidence_unknown
+    );
+
+    let missing_location = findings
+        .iter()
+        .filter(|finding| finding.location_hint.is_none())
+        .count();
+    let missing_evidence = findings
+        .iter()
+        .filter(|finding| finding.evidence_text.is_none())
+        .count();
+    let missing_action = findings
+        .iter()
+        .filter(|finding| finding.action.is_none())
+        .count();
+    println!("triage.missing_location: {}", missing_location);
+    println!("triage.missing_evidence: {}", missing_evidence);
+    println!("triage.missing_action: {}", missing_action);
+
+    let low_confidence_high_severity = findings
+        .iter()
+        .filter(|finding| {
+            finding.confidence == reviva_core::Confidence::Low
+                && matches!(
+                    finding.severity,
+                    Some(reviva_core::Severity::High) | Some(reviva_core::Severity::Critical)
+                )
+        })
+        .count();
+    println!(
+        "triage.low_confidence_high_severity: {}",
+        low_confidence_high_severity
+    );
+
+    let mut summary_counts = BTreeMap::new();
+    for finding in findings {
+        let key = normalize_summary_for_triage(&finding.summary);
+        let count = summary_counts.entry(key).or_insert(0_usize);
+        *count += 1;
+    }
+    let mut repeats = summary_counts
+        .into_iter()
+        .filter(|(_, count)| *count > 1)
+        .collect::<Vec<_>>();
+    repeats.sort_by(|(left_summary, left_count), (right_summary, right_count)| {
+        right_count
+            .cmp(left_count)
+            .then_with(|| left_summary.cmp(right_summary))
+    });
+    if repeats.is_empty() {
+        println!("triage.repeated_summaries: none");
+    } else {
+        println!("triage.repeated_summaries:");
+        for (summary, count) in repeats.into_iter().take(5) {
+            println!("triage.repeat: {} | {}", count, summary);
+        }
+    }
+}
+
+fn normalize_summary_for_triage(summary: &str) -> String {
+    summary
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase()
+}
+
 fn print_usage() {
     println!("reviva scan [--repo PATH]");
     println!("reviva review --repo PATH [--mode MODE] [--profile NAME] [--profile-file PATH] [--max-findings N] [--max-output-tokens N] [--file PATH]... [--boundary-left PATH --boundary-right PATH] [--incremental-from GIT_REF] [--note TEXT] [--prompt-wrapper plain|qwen-chatml] [--kv-cache on|off] [--kv-slot SLOT_ID] [--llama-lifecycle manual|ensure-running|ensure-running-and-stop] [--preview-only] [--llama-model-path PATH_OR_DIR] [--llama-server-path PATH]");
@@ -1401,7 +1673,7 @@ fn print_usage() {
     println!("reviva set list --repo PATH");
     println!("reviva session list --repo PATH");
     println!("reviva session show --repo PATH --id SESSION_ID");
-    println!("reviva findings list --repo PATH [--session SESSION_ID]");
+    println!("reviva findings list --repo PATH [--session SESSION_ID] [--triage]");
     println!("reviva export --repo PATH --session SESSION_ID [--format md|json] [--output PATH]");
 }
 

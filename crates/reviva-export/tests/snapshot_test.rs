@@ -78,11 +78,13 @@ fn markdown_export_snapshot() {
 - Profile Hash: `profile-hash`
 - Target: `boundary:left=src/left.rs right=src/right.rs`
 
-## Prompt
+## Prompt Metadata
 
-```text
-PROMPT
-```
+- Prompt Preview Equals Sent: `true`
+- Prompt Chars: `6`
+- Prompt Lines: `1`
+- Prompt Hash (fnv1a64): `fdcb138bff2ccc3b`
+- Prompt Body: `stored_in_session`
 
 ## Parsed Response
 
@@ -121,6 +123,9 @@ fn json_export_is_valid_and_contains_fields() {
         "completed"
     );
     assert!(parsed["session"]["response"]["raw_http_body"].is_null());
+    assert_eq!(parsed["session"]["prompt"]["stored_in_session"], true);
+    assert_eq!(parsed["session"]["prompt"]["preview_equals_sent"], true);
+    assert_eq!(parsed["session"]["prompt"]["chars"], 6);
     assert_eq!(parsed["findings"][0]["normalization_state"], "structured");
     assert_eq!(parsed["findings"][0]["severity_origin"], "model_labeled");
 }

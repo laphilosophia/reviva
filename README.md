@@ -128,7 +128,7 @@ reviva set load --repo PATH --name NAME
 reviva set list --repo PATH
 reviva session list --repo PATH
 reviva session show --repo PATH --id SESSION_ID
-reviva findings list --repo PATH [--session SESSION_ID]
+reviva findings list --repo PATH [--session SESSION_ID] [--triage]
 reviva export --repo PATH --session SESSION_ID [--format md|json] [--output PATH]
 ```
 
@@ -226,6 +226,10 @@ Finding normalization state is explicit:
 
 If normalization is partial/raw-only, warnings are stored with reason tags.
 Markdown/JSON exports prioritize parsed response interpretation for readability; full raw backend body remains in session files.
+Exports now keep prompt/body readability by default:
+
+- Markdown export shows prompt metadata (hash/line/char counts) instead of dumping full prompt text.
+- JSON export includes prompt metadata and parsed response shape, while full prompt/raw bodies stay in canonical session JSON.
 
 Profile TOML supports optional limits:
 

@@ -94,7 +94,7 @@ fn end_to_end_cli_flow_and_prompt_inspectability() {
             "session-test",
         ],
     );
-    assert!(session_show.contains("findings: 1"));
+    assert!(session_show.contains("findings.total: 1"));
 
     let findings_output = run_cmd(
         temp.path(),
@@ -109,6 +109,22 @@ fn end_to_end_cli_flow_and_prompt_inspectability() {
     );
     assert!(findings_output.contains("structured"));
     assert!(findings_output.contains("model_labeled"));
+
+    let triage_output = run_cmd(
+        temp.path(),
+        &[
+            "findings",
+            "list",
+            "--repo",
+            temp.path().to_str().expect("repo str"),
+            "--session",
+            "session-test",
+            "--triage",
+        ],
+    );
+    assert!(triage_output.contains("triage.total_findings: 1"));
+    assert!(triage_output.contains("triage.by_state: structured=1 partial=0 raw_only=0"));
+    assert!(triage_output.contains("triage.repeated_summaries: none"));
 
     let export_output = run_cmd(
         temp.path(),

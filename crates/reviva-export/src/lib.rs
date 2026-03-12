@@ -18,15 +18,28 @@ pub fn export_session_markdown(session: &Session) -> String {
         format_target(&session.selected_target)
     ));
 
-    output.push_str("## Prompt\n\n```text\n");
-    output.push_str(&session.prompt_sent);
-    if !session.prompt_sent.ends_with('\n') {
-        output.push('\n');
-    }
-    output.push_str("```\n\n");
+    output.push_str("## Prompt Metadata\n\n");
+    output.push_str(&format!(
+        "- Prompt Preview Equals Sent: `{}`\n",
+        session.prompt_preview == session.prompt_sent
+    ));
+    output.push_str(&format!(
+        "- Prompt Chars: `{}`\n",
+        session.prompt_sent.chars().count()
+    ));
+    output.push_str(&format!(
+        "- Prompt Lines: `{}`\n",
+        line_count(&session.prompt_sent)
+    ));
+    output.push_str(&format!(
+        "- Prompt Hash (fnv1a64): `{}`\n",
+        fnv1a64_hex(&session.prompt_sent)
+    ));
+    output.push_str("- Prompt Body: `stored_in_session`\n\n");
 
     output.push_str("## Parsed Response\n\n```text\n");
-    let interpreted = render_interpreted_response(&session.response.response_interpretation);
+    let interpreted =
+        render_interpreted_response_excerpt(&session.response.response_interpretation, 120, 8_000);
     output.push_str(&interpreted);
     if !interpreted.ends_with('\n') {
         output.push('\n');
@@ -128,8 +141,13 @@ pub fn export_session_json(session: &Session) -> String {
                 "path": session.profile.path,
                 "hash": session.profile.hash,
             },
-            "prompt_preview": session.prompt_preview,
-            "prompt_sent": session.prompt_sent,
+            "prompt": {
+                "preview_equals_sent": session.prompt_preview == session.prompt_sent,
+                "chars": session.prompt_sent.chars().count(),
+                "lines": line_count(&session.prompt_sent),
+                "hash_fnv1a64": fnv1a64_hex(&session.prompt_sent),
+                "stored_in_session": true,
+            },
             "backend": {
                 "base_url": session.backend.base_url,
                 "model": session.backend.model,
@@ -152,9 +170,15 @@ pub fn export_session_json(session: &Session) -> String {
     serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "{}".to_string())
 }
 
-fn render_interpreted_response(interpretation: &ResponseInterpretation) -> String {
+fn render_interpreted_response_excerpt(
+    interpretation: &ResponseInterpretation,
+    max_lines: usize,
+    max_chars: usize,
+) -> String {
     match interpretation {
-        ResponseInterpretation::Completed { content } => content.clone(),
+        ResponseInterpretation::Completed { content } => {
+            clip_text_for_humans(content, max_lines, max_chars)
+        }
         ResponseInterpretation::Empty => "<empty>".to_string(),
         ResponseInterpretation::Malformed { reason } => reason.clone(),
     }
@@ -173,6 +197,53 @@ fn response_interpretation_to_json(interpretation: &ResponseInterpretation) -> V
             "kind": "malformed",
             "reason": reason,
         }),
+    }
+}
+
+fn clip_text_for_humans(content: &str, max_lines: usize, max_chars: usize) -> String {
+    if content.is_empty() {
+        return String::new();
+    }
+
+    let mut clipped = String::new();
+    let mut chars_written = 0_usize;
+
+    for (lines_written, line) in content.lines().enumerate() {
+        let line_len = line.chars().count();
+        let next_chars = chars_written + line_len + if lines_written > 0 { 1 } else { 0 };
+        if lines_written >= max_lines || next_chars > max_chars {
+            clipped
+                .push_str("\n... <truncated for readability; full content is stored in session>");
+            return clipped;
+        }
+        if lines_written > 0 {
+            clipped.push('\n');
+            chars_written += 1;
+        }
+        clipped.push_str(line);
+        chars_written += line_len;
+    }
+
+    if content.ends_with('\n') {
+        clipped.push('\n');
+    }
+    clipped
+}
+
+fn fnv1a64_hex(value: &str) -> String {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for byte in value.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{hash:016x}")
+}
+
+fn line_count(value: &str) -> usize {
+    if value.is_empty() {
+        0
+    } else {
+        value.lines().count()
     }
 }
 
