@@ -7,6 +7,12 @@ pub fn export_session_markdown(session: &Session) -> String {
     output.push_str(&format!("- Session ID: `{}`\n", session.id));
     output.push_str(&format!("- Created At: `{}`\n", session.created_at));
     output.push_str(&format!("- Mode: `{}`\n", session.review_mode.as_str()));
+    output.push_str(&format!("- Profile: `{}`\n", session.profile.name));
+    output.push_str(&format!("- Profile Source: `{}`\n", session.profile.source));
+    if let Some(path) = &session.profile.path {
+        output.push_str(&format!("- Profile Path: `{}`\n", path));
+    }
+    output.push_str(&format!("- Profile Hash: `{}`\n", session.profile.hash));
     output.push_str(&format!(
         "- Target: `{}`\n\n",
         format_target(&session.selected_target)
@@ -25,6 +31,14 @@ pub fn export_session_markdown(session: &Session) -> String {
         output.push('\n');
     }
     output.push_str("```\n\n");
+
+    if !session.warnings.is_empty() {
+        output.push_str("## Warnings\n\n");
+        for warning in &session.warnings {
+            output.push_str(&format!("- `{warning}`\n"));
+        }
+        output.push('\n');
+    }
 
     output.push_str("## Findings\n\n");
     if session.findings.is_empty() {
@@ -103,6 +117,12 @@ pub fn export_session_json(session: &Session) -> String {
             "repository_root": session.repository_root,
             "review_mode": session.review_mode.as_str(),
             "selected_target": format_target(&session.selected_target),
+            "profile": {
+                "name": session.profile.name,
+                "source": session.profile.source,
+                "path": session.profile.path,
+                "hash": session.profile.hash,
+            },
             "prompt_preview": session.prompt_preview,
             "prompt_sent": session.prompt_sent,
             "backend": {

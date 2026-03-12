@@ -7,6 +7,8 @@ license.workspace = true
 # See docs/module.md §reviva-prompts
 [dependencies]
 reviva-core = { workspace = true }
+serde = { workspace = true }
+toml = { workspace = true }
 
 [dev-dependencies]
 insta = { workspace = true }

@@ -229,6 +229,14 @@ pub struct RevivaResponse {
     pub response_interpretation: ResponseInterpretation,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProfileMetadata {
+    pub name: String,
+    pub source: String,
+    pub path: Option<String>,
+    pub hash: String,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Session {
     pub id: String,
@@ -240,6 +248,7 @@ pub struct Session {
     pub backend: BackendSettings,
     pub response: RevivaResponse,
     pub findings: Vec<Finding>,
+    pub profile: ProfileMetadata,
     pub created_at: String,
     pub warnings: Vec<String>,
 }

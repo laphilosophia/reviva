@@ -1,6 +1,6 @@
 use reviva_core::{
-    BackendSettings, BoundaryTarget, Confidence, Finding, NamedSet, NormalizationState, RevivaMode,
-    RevivaResponse, RevivaTarget, Session, Severity, SeverityOrigin,
+    BackendSettings, BoundaryTarget, Confidence, Finding, NamedSet, NormalizationState,
+    ProfileMetadata, RevivaMode, RevivaResponse, RevivaTarget, Session, Severity, SeverityOrigin,
 };
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -11,6 +11,9 @@ use std::path::{Path, PathBuf};
 pub struct AppConfig {
     pub backend_url: String,
     pub model: Option<String>,
+    pub prompt_wrapper: Option<String>,
+    pub review_profile: Option<String>,
+    pub review_profile_file: Option<String>,
     pub llama_server_path: Option<String>,
     pub llama_model_path: Option<String>,
     pub timeout_ms: u64,
@@ -26,6 +29,9 @@ impl Default for AppConfig {
         Self {
             backend_url: "http://127.0.0.1:8080".to_string(),
             model: None,
+            prompt_wrapper: None,
+            review_profile: None,
+            review_profile_file: None,
             llama_server_path: None,
             llama_model_path: None,
             timeout_ms: 60_000,
@@ -239,6 +245,9 @@ impl Storage {
 struct AppConfigDto {
     backend_url: String,
     model: Option<String>,
+    prompt_wrapper: Option<String>,
+    review_profile: Option<String>,
+    review_profile_file: Option<String>,
     llama_server_path: Option<String>,
     llama_model_path: Option<String>,
     timeout_ms: u64,
@@ -254,6 +263,9 @@ impl From<AppConfig> for AppConfigDto {
         Self {
             backend_url: value.backend_url,
             model: value.model,
+            prompt_wrapper: value.prompt_wrapper,
+            review_profile: value.review_profile,
+            review_profile_file: value.review_profile_file,
             llama_server_path: value.llama_server_path,
             llama_model_path: value.llama_model_path,
             timeout_ms: value.timeout_ms,
@@ -271,6 +283,9 @@ impl From<AppConfigDto> for AppConfig {
         Self {
             backend_url: value.backend_url,
             model: value.model,
+            prompt_wrapper: value.prompt_wrapper,
+            review_profile: value.review_profile,
+            review_profile_file: value.review_profile_file,
             llama_server_path: value.llama_server_path,
             llama_model_path: value.llama_model_path,
             timeout_ms: value.timeout_ms,
@@ -318,6 +333,8 @@ struct SessionDto {
     backend: BackendSettingsDto,
     response: RevivaResponseDto,
     findings: Vec<FindingDto>,
+    #[serde(default)]
+    profile: Option<ProfileMetadataDto>,
     created_at: String,
     warnings: Vec<String>,
 }
@@ -334,6 +351,7 @@ impl From<Session> for SessionDto {
             backend: value.backend.into(),
             response: value.response.into(),
             findings: value.findings.into_iter().map(Into::into).collect(),
+            profile: Some(value.profile.into()),
             created_at: value.created_at,
             warnings: value.warnings,
         }
@@ -352,8 +370,44 @@ impl From<SessionDto> for Session {
             backend: value.backend.into(),
             response: value.response.into(),
             findings: value.findings.into_iter().map(Into::into).collect(),
+            profile: value.profile.map(Into::into).unwrap_or(ProfileMetadata {
+                name: "default".to_string(),
+                source: "unknown".to_string(),
+                path: None,
+                hash: "unknown".to_string(),
+            }),
             created_at: value.created_at,
             warnings: value.warnings,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ProfileMetadataDto {
+    name: String,
+    source: String,
+    path: Option<String>,
+    hash: String,
+}
+
+impl From<ProfileMetadata> for ProfileMetadataDto {
+    fn from(value: ProfileMetadata) -> Self {
+        Self {
+            name: value.name,
+            source: value.source,
+            path: value.path,
+            hash: value.hash,
+        }
+    }
+}
+
+impl From<ProfileMetadataDto> for ProfileMetadata {
+    fn from(value: ProfileMetadataDto) -> Self {
+        Self {
+            name: value.name,
+            source: value.source,
+            path: value.path,
+            hash: value.hash,
         }
     }
 }

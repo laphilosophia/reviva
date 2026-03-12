@@ -1,6 +1,7 @@
 use reviva_core::{
-    BackendSettings, Confidence, Finding, NormalizationState, ResponseInterpretation, RevivaMode,
-    RevivaResponse, RevivaTarget, Session, Severity, SeverityOrigin,
+    BackendSettings, Confidence, Finding, NormalizationState, ProfileMetadata,
+    ResponseInterpretation, RevivaMode, RevivaResponse, RevivaTarget, Session, Severity,
+    SeverityOrigin,
 };
 use reviva_storage::{AppConfig, Storage, StorageError};
 use tempfile::TempDir;
@@ -46,6 +47,12 @@ fn fixture_session() -> Session {
             raw_labels: vec!["high".to_string()],
             normalization_state: NormalizationState::Structured,
         }],
+        profile: ProfileMetadata {
+            name: "default".to_string(),
+            source: "built_in".to_string(),
+            path: None,
+            hash: "abc123".to_string(),
+        },
         created_at: "1700000000".to_string(),
         warnings: vec!["estimated_token_budget=200".to_string()],
     }
@@ -64,6 +71,10 @@ fn roundtrip_session_config_and_set() {
     assert_eq!(
         config.estimated_prompt_tokens,
         loaded_config.estimated_prompt_tokens
+    );
+    assert_eq!(
+        config.review_profile_file,
+        loaded_config.review_profile_file
     );
 
     let session = fixture_session();

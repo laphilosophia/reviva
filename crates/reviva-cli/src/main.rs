@@ -1,10 +1,14 @@
 use reviva_backend::{CompletionBackend, LlamaCompletionBackend};
 use reviva_core::{
-    BackendSettings, BoundaryTarget, NamedSet, ResponseInterpretation, RevivaMode, RevivaRequest,
-    RevivaTarget, Session,
+    BackendSettings, BoundaryTarget, NamedSet, ProfileMetadata, ResponseInterpretation, RevivaMode,
+    RevivaRequest, RevivaTarget, Session,
 };
 use reviva_export::{export_session_json, export_session_markdown};
-use reviva_prompts::{build_prompt, normalize_findings, PromptBuildConfig, PromptFile};
+use reviva_prompts::{
+    apply_prompt_wrapper, build_prompt, normalize_findings_with_reasons, parse_prompt_wrapper,
+    parse_review_profile_toml, resolve_built_in_review_profile, PromptBuildConfig, PromptFile,
+    PromptWrapper, ReviewProfileSpec,
+};
 use reviva_repo::{estimated_target_tokens, load_target_files, scan_repository, RepoScanConfig};
 use reviva_storage::{AppConfig, Storage};
 use std::env;
@@ -75,8 +79,11 @@ fn cmd_scan(args: &[String]) -> Result<(), String> {
 fn cmd_review(args: &[String]) -> Result<(), String> {
     let repo = parse_repo_arg(args)?;
     let mode = parse_mode_arg(args)?;
+    let profile = parse_optional_arg(args, "--profile");
+    let profile_file = parse_optional_arg(args, "--profile-file");
     let note = parse_optional_arg(args, "--note");
     let model = parse_optional_arg(args, "--model");
+    let prompt_wrapper_arg = parse_optional_arg(args, "--prompt-wrapper");
     let llama_model_path = parse_optional_arg(args, "--llama-model-path");
     let llama_server_path = parse_optional_arg(args, "--llama-server-path");
     let preview_only = has_flag(args, "--preview-only");
@@ -96,11 +103,23 @@ fn cmd_review(args: &[String]) -> Result<(), String> {
         config.llama_server_path = Some(path);
         config_updated = true;
     }
+    if let Some(value) = prompt_wrapper_arg {
+        let parsed = parse_prompt_wrapper(&value).map_err(|error| error.to_string())?;
+        config.prompt_wrapper = Some(parsed.as_str().to_string());
+        config_updated = true;
+    }
     if config_updated {
         storage
             .save_config(&config)
             .map_err(|error| error.to_string())?;
     }
+    let resolved_profile = resolve_review_profile(
+        &repo,
+        profile.as_deref(),
+        profile_file.as_deref(),
+        config.review_profile.as_deref(),
+        config.review_profile_file.as_deref(),
+    )?;
     let target = resolve_target(&repo, args, files, boundary_left, boundary_right)?;
     let repo_config = RepoScanConfig {
         max_file_bytes: config.max_file_bytes,
@@ -129,6 +148,7 @@ fn cmd_review(args: &[String]) -> Result<(), String> {
         .collect::<Vec<_>>();
     let prompt_result = build_prompt(
         mode,
+        &resolved_profile.spec,
         &target,
         &prompt_files,
         note.as_deref(),
@@ -137,9 +157,11 @@ fn cmd_review(args: &[String]) -> Result<(), String> {
         },
     )
     .map_err(|error| error.to_string())?;
+    let prompt_wrapper = resolve_prompt_wrapper(config.prompt_wrapper.as_deref())?;
+    let wrapped_prompt = apply_prompt_wrapper(&prompt_result.prompt, prompt_wrapper);
 
     println!("--- PROMPT PREVIEW START ---");
-    println!("{}", prompt_result.prompt);
+    println!("{}", wrapped_prompt);
     println!("--- PROMPT PREVIEW END ---");
     if preview_only {
         return Ok(());
@@ -155,7 +177,7 @@ fn cmd_review(args: &[String]) -> Result<(), String> {
     };
     let request = RevivaRequest {
         backend: backend_settings.clone(),
-        prompt: prompt_result.prompt.clone(),
+        prompt: wrapped_prompt.clone(),
     };
     let _llama_server_guard = ensure_llama_server(&storage, &mut config, &backend_settings)
         .map_err(|error| format!("llama-server preflight failed: {error}"))?;
@@ -170,14 +192,29 @@ fn cmd_review(args: &[String]) -> Result<(), String> {
         ResponseInterpretation::Malformed { reason } => reason.clone(),
     };
     let session_id = session_id();
-    let (normalization_state, mut findings) = normalize_findings(
+    let normalization_report = normalize_findings_with_reasons(
         &session_id,
         mode,
         &target.as_paths().join(","),
         &model_output,
     );
+    let normalization_state = normalization_report.state;
+    let mut findings = normalization_report.findings;
     for finding in &mut findings {
         finding.normalization_state = normalization_state;
+    }
+
+    let mut warnings = vec![
+        format!("profile={}", resolved_profile.spec.name),
+        format!("profile_source={}", resolved_profile.source),
+        format!("prompt_wrapper={}", prompt_wrapper.as_str()),
+        format!(
+            "estimated_token_budget={}",
+            estimated_target_tokens(&loaded, note.as_deref())
+        ),
+    ];
+    for reason in normalization_report.reason_tags {
+        warnings.push(format!("normalization_reason={reason}"));
     }
 
     let session = Session {
@@ -185,16 +222,19 @@ fn cmd_review(args: &[String]) -> Result<(), String> {
         repository_root: repo.display().to_string(),
         review_mode: mode,
         selected_target: target,
-        prompt_preview: prompt_result.prompt.clone(),
-        prompt_sent: prompt_result.prompt,
+        prompt_preview: wrapped_prompt.clone(),
+        prompt_sent: wrapped_prompt,
         backend: backend_settings,
         response,
         findings,
+        profile: ProfileMetadata {
+            name: resolved_profile.spec.name.clone(),
+            source: resolved_profile.source.clone(),
+            path: resolved_profile.path.clone(),
+            hash: resolved_profile.hash.clone(),
+        },
         created_at: current_timestamp(),
-        warnings: vec![format!(
-            "estimated_token_budget={}",
-            estimated_target_tokens(&loaded, note.as_deref())
-        )],
+        warnings,
     };
     let session_path = storage
         .save_session(&session)
@@ -270,8 +310,20 @@ fn cmd_session(args: &[String]) -> Result<(), String> {
             println!("id: {}", session.id);
             println!("mode: {}", session.review_mode.as_str());
             println!("target: {}", session.selected_target.as_paths().join(","));
+            println!("profile: {}", session.profile.name);
+            println!("profile_source: {}", session.profile.source);
+            println!("profile_hash: {}", session.profile.hash);
+            if let Some(path) = session.profile.path.as_deref() {
+                println!("profile_path: {path}");
+            }
             println!("created_at: {}", session.created_at);
             println!("findings: {}", session.findings.len());
+            if !session.warnings.is_empty() {
+                println!("warnings: {}", session.warnings.len());
+                for warning in &session.warnings {
+                    println!("warning: {warning}");
+                }
+            }
             Ok(())
         }
         _ => Err("unknown session subcommand".to_string()),
@@ -643,6 +695,91 @@ fn parse_mode_arg(args: &[String]) -> Result<RevivaMode, String> {
         .map_err(|error| error.to_string())
 }
 
+fn resolve_prompt_wrapper(value: Option<&str>) -> Result<PromptWrapper, String> {
+    match value {
+        Some(raw) => parse_prompt_wrapper(raw).map_err(|error| error.to_string()),
+        None => Ok(PromptWrapper::Plain),
+    }
+}
+
+struct ResolvedProfile {
+    spec: ReviewProfileSpec,
+    source: String,
+    path: Option<String>,
+    hash: String,
+}
+
+fn resolve_review_profile(
+    repo: &Path,
+    profile_arg: Option<&str>,
+    profile_file_arg: Option<&str>,
+    config_profile: Option<&str>,
+    config_profile_file: Option<&str>,
+) -> Result<ResolvedProfile, String> {
+    if let Some(path_value) = profile_file_arg.or(config_profile_file) {
+        let profile_path = resolve_profile_path(repo, path_value)?;
+        let profile_content =
+            fs::read_to_string(&profile_path).map_err(|error| error.to_string())?;
+        let profile_spec =
+            parse_review_profile_toml(&profile_content).map_err(|error| error.to_string())?;
+        let source = if profile_file_arg.is_some() {
+            "cli_profile_file"
+        } else {
+            "config_profile_file"
+        };
+        return Ok(ResolvedProfile {
+            spec: profile_spec,
+            source: source.to_string(),
+            path: Some(profile_path.to_string_lossy().to_string()),
+            hash: fnv1a64_hex(&profile_content),
+        });
+    }
+
+    let resolved_name = profile_arg.or(config_profile).unwrap_or("default");
+    let source = if profile_arg.is_some() {
+        "cli_profile"
+    } else if config_profile.is_some() {
+        "config_profile"
+    } else {
+        "default_profile"
+    };
+    let profile_spec =
+        resolve_built_in_review_profile(resolved_name).map_err(|error| error.to_string())?;
+
+    Ok(ResolvedProfile {
+        hash: fnv1a64_hex(&profile_spec.canonical_text()),
+        spec: profile_spec,
+        source: source.to_string(),
+        path: None,
+    })
+}
+
+fn resolve_profile_path(repo: &Path, path_value: &str) -> Result<PathBuf, String> {
+    let raw = PathBuf::from(path_value);
+    let path = if raw.is_absolute() {
+        raw
+    } else {
+        repo.join(raw)
+    };
+    if !path.exists() {
+        return Err(format!("profile file not found: {}", path.display()));
+    }
+    if !path.is_file() {
+        return Err(format!("profile path is not a file: {}", path.display()));
+    }
+    path.canonicalize()
+        .map_err(|error| format!("cannot resolve profile file path: {error}"))
+}
+
+fn fnv1a64_hex(value: &str) -> String {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for byte in value.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{hash:016x}")
+}
+
 fn parse_required_arg(args: &[String], flag: &str) -> Result<String, String> {
     parse_optional_arg(args, flag).ok_or_else(|| format!("missing required argument: {flag}"))
 }
@@ -694,7 +831,7 @@ fn session_id() -> String {
 
 fn print_usage() {
     println!("reviva scan [--repo PATH]");
-    println!("reviva review --repo PATH --mode MODE [--file PATH]... [--boundary-left PATH --boundary-right PATH] [--note TEXT] [--preview-only] [--llama-model-path PATH_OR_DIR] [--llama-server-path PATH]");
+    println!("reviva review --repo PATH --mode MODE [--profile NAME] [--profile-file PATH] [--file PATH]... [--boundary-left PATH --boundary-right PATH] [--note TEXT] [--prompt-wrapper plain|qwen-chatml] [--preview-only] [--llama-model-path PATH_OR_DIR] [--llama-server-path PATH]");
     println!("reviva set save --repo PATH --name NAME --file PATH...");
     println!("reviva set load --repo PATH --name NAME");
     println!("reviva set list --repo PATH");

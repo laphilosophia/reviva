@@ -1,145 +1,212 @@
 # Reviva
 
-Reviva is a local-first code review terminal for constrained, inspectable, and repeatable repository analysis with local LLMs.
+Reviva is a local-first review terminal for deterministic, inspectable, and constrained repository analysis with local LLM backends.
 
-> It is not a coding agent, not an IDE copilot, and not a general-purpose chat interface. Its job is narrower: traverse a repository, let the user select files or boundaries, run focused review modes against a local model backend, and store findings in a form that can be revisited later.
+It is intentionally narrow:
 
-> The project exists because local review workflows are often degraded by opaque editor integrations, prompt-template drift, hidden tool-calling behavior, and fragile chat abstractions. Reviva removes that layer and keeps the review path explicit.
+- scan repository files
+- select an explicit review target
+- build a visible prompt for a specific review mode
+- send to a local completion backend
+- preserve raw response
+- persist normalized findings and session artifacts
 
-## Why this exists
+It is not a chatbot, IDE copilot, or autonomous coding agent.
 
-A local model may be perfectly capable of reviewing code, yet still become unreliable once it is wrapped by editor extensions, integrated chats, agent loops, or hidden prompt orchestration. The result is familiar: malformed responses, self-generated questions, broken role formatting, unstable context behavior, or review output that cannot be trusted operationally.
+## Why Reviva
 
-Reviva addresses that by reducing the surface area.
+Many local review flows become opaque once hidden prompt templates, chat abstractions, and agent loops are introduced. Reviva keeps the review path explicit and auditable.
 
-- The user selects the files.
-- The review mode is explicit.
-- The prompt is inspectable.
-- The backend is local.
-- The output is preserved.
-- The findings are stored.
+Core principles:
 
-## What it does
+- local-first behavior
+- explicit prompt preview
+- explicit backend URL/model
+- deterministic target selection
+- plain error reporting
+- human-inspectable storage
 
-Reviva scans a repository, allows explicit target selection, builds a controlled prompt for a selected review mode, sends it to a local inference backend, displays the response, and records findings.
+## What You Can Do
 
-> The initial focus is semantic review, not code generation.
+- `scan` a repo with conservative filtering
+- `review` a file, file set, or boundary pair
+- use built-in or file-based review profiles
+- inspect prompt before execution
+- list and inspect sessions/findings
+- export session output to Markdown or JSON
 
-The model is treated as a constrained reviewer, not an author. Supported review modes are intended to stay narrow and operational:
-
-```text
--> contract
--> boundary
--> boundedness
--> failure-semantics
--> performance-risk
--> memory-risk
--> operator-correctness
--> launch-readiness
--> maintainability
-```
-
-## What it is not
-
-- Reviva does not replace Semgrep, CodeQL, profilers, tests, or benchmarks.
-- Reviva does not autonomously plan work.
-- Reviva does not mutate repository files by default.
-- Reviva does not depend on cloud inference.
-- Reviva does not attempt to become a chatbot.
-
-## Design goals
-
-The project is built around a few hard constraints.
-
-1. Local-first operation. Repository contents should stay local unless the user explicitly configures a remote backend.
-2. Prompt transparency. Prompt construction must be visible and inspectable.
-3. Narrow review modes. Broad “review the repo” behavior is low-signal and unstable. Focused review modes are more useful.
-4. Reproducibility. The same file set, review mode, and model settings should produce operationally comparable output.
-5. Plain failure behavior. Empty responses, malformed output, timeouts, prompt oversize, and backend errors must be surfaced directly rather than hidden.
-
-## High-level workflow
-
-The expected workflow is simple:
-
-1. Scan a repository.
-2. Select one file, a file set, or a boundary pair.
-3. Choose a review mode.
-4. Preview the generated prompt.
-5. Send the request to a local backend.
-6. Inspect the raw response.
-7. Extract and save findings.
-8. Export the session if needed.
-
-## Architecture
-
-Reviva assumes an external local inference server.
-
-The first target is a completion-style HTTP backend, such as `llama-server`, because completion-style requests give explicit control over prompt construction and avoid some of the fragility introduced by chat-template handling.
-
-Chat-style backends may be supported later, but only if prompt behavior remains explicit and testable.
-
-## Output philosophy
-
-The first version prefers stable plain-text outputs with fixed sections over aggressive structured-output assumptions.
-
-Raw model output must always be preserved.
-If finding extraction fails, the raw output still remains part of the session record.
-The system should not discard results merely because formatting drifted.
-
-A finding is expected to carry at least:
+Supported review modes:
 
 ```text
--> severity
--> risk class
--> location
--> issue
--> why it matters
--> confidence
--> action
+contract
+boundary
+boundedness
+failure-semantics
+performance-risk
+memory-risk
+operator-correctness
+launch-readiness
+maintainability
 ```
 
-## Storage model
+## Requirements
 
-Reviva stores its state locally in a human-inspectable format.
+- Rust toolchain (stable)
+- local inference backend reachable via HTTP completion endpoint
+- optional: `llama-server` in `PATH` for local auto-start flow
+
+## Build
+
+```bash
+cargo build
+```
+
+Run directly from workspace:
+
+```bash
+cargo run -p reviva-cli -- --help
+```
+
+If you install the binary, command name is `reviva`.
+
+## Quick Start
+
+1. Scan a repo:
+
+```bash
+reviva scan --repo /path/to/repo
+```
+
+1. Run a focused review:
+
+```bash
+reviva review \
+  --repo /path/to/repo \
+  --mode launch-readiness \
+  --file src/main.rs
+```
+
+1. Inspect results:
+
+```bash
+reviva session list --repo /path/to/repo
+reviva session show --repo /path/to/repo --id <SESSION_ID>
+reviva findings list --repo /path/to/repo --session <SESSION_ID>
+```
+
+1. Export:
+
+```bash
+reviva export --repo /path/to/repo --session <SESSION_ID> --format md
+reviva export --repo /path/to/repo --session <SESSION_ID> --format json
+```
+
+## CLI Surface
+
+```text
+reviva scan [--repo PATH]
+reviva review --repo PATH --mode MODE [--profile NAME] [--profile-file PATH] [--file PATH]... [--boundary-left PATH --boundary-right PATH] [--note TEXT] [--prompt-wrapper plain|qwen-chatml] [--preview-only] [--llama-model-path PATH_OR_DIR] [--llama-server-path PATH]
+reviva set save --repo PATH --name NAME --file PATH...
+reviva set load --repo PATH --name NAME
+reviva set list --repo PATH
+reviva session list --repo PATH
+reviva session show --repo PATH --id SESSION_ID
+reviva findings list --repo PATH [--session SESSION_ID]
+reviva export --repo PATH --session SESSION_ID [--format md|json] [--output PATH]
+```
+
+## Configuration
+
+Reviva reads `.reviva/config.toml` from the target repository root.
+
+Example:
+
+```toml
+backend_url = "http://127.0.0.1:8080"
+model = "local-model-name"
+prompt_wrapper = "plain"
+llama_model_path = "path/to/models/my-model/model.gguf" # Windows -> "path\\to\\models\\my-model\\model.gguf"
+llama_server_path = "llama-server"
+timeout_ms = 60000
+max_tokens = 2048
+temperature = 0.1
+stop_sequences = []
+max_file_bytes = 262144
+estimated_prompt_tokens = 16000
+```
+
+Notes:
+
+- `prompt_wrapper` defaults to `plain` if omitted.
+- Use `qwen-chatml` only for backends/models that expect ChatML-style prompting.
+- `max_file_bytes` and `estimated_prompt_tokens` are conservative defaults, not hard domain invariants.
+
+## Target Selection Behavior
+
+`review` target resolution order:
+
+1. `--boundary-left` + `--boundary-right`
+2. one or more `--file`
+3. interactive selection (TTY only)
+
+In non-interactive environments, Reviva fails fast if no explicit target is provided.
+
+Boundary mode enforces deterministic ordering: `left -> right`.
+
+## llama-server Integration
+
+When backend is `http://127.0.0.1:8080` or `http://localhost:8080`, Reviva manages `llama-server` explicitly:
+
+- if server is active, Reviva reuses it
+- if server is inactive, Reviva starts it
+- if Reviva started it, Reviva stops it when command exits
+- if `llama-server` binary is missing, Reviva returns explicit install guidance
+- if model path is missing in non-interactive mode, Reviva fails with a clear error
+
+## Output and Persistence
+
+Reviva persists data under:
 
 ```text
 .reviva/
-  ├─ config.toml
-  ├─ sets/
-  ├─ sessions/
-  ├─ findings/
-  └─ exports/
+  config.toml
+  sessions/
+  findings/
+  sets/
+  exports/
 ```
 
-The exact file structure may evolve, but the principle will not: local, explicit, inspectable.
+Session is the canonical truth source. Raw backend response is always preserved.
 
-## Security and privacy
+Finding normalization state is explicit:
 
-Reviva defaults to local-only behavior. This is review infrastructure, not data collection.
+- `structured`
+- `partial`
+- `raw_only`
 
-```text
-Not execute repository code.
-Not include hidden telemetry.
-Vlearly display which backend URL is active.
-Never silently send repository content elsewhere.
+If normalization is partial/raw-only, warnings are stored with reason tags.
+
+## Troubleshooting
+
+- `normalization_state=raw_only`: inspect `session show` warnings and raw response body.
+- backend timeouts/unreachable: verify `backend_url`, server status, and timeout settings.
+- prompt budget refusal: narrow target selection or shorten `--note`.
+- empty findings with non-empty response: verify output contract adherence and wrapper choice.
+
+## Development
+
+Run key tests:
+
+```bash
+cargo test -p reviva-prompts -p reviva-cli -p reviva-storage -p reviva-export
 ```
 
-## Contributing
+Format:
 
-Contributions are welcome, but changes that push the system toward autonomous agent behavior, hidden orchestration, or chat-centric UX will likely be rejected. The tool should stay small, explicit, and operationally trustworthy.
-
-If you contribute, keep the following in mind:
-
-- prefer explicit behavior over convenience
-- preserve prompt inspectability
-- keep review modes narrow
-- do not hide backend behavior
-- avoid feature creep into copilot territory
+```bash
+cargo fmt
+```
 
 ## License
 
-Apache 2.0
-
-## Final statement
-
-Reviva is a local review appliance for repositories. It exists to make LLM-assisted semantic review inspectable, reproducible, and useful without inheriting the instability of full agent stacks.
+Apache-2.0

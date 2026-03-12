@@ -1,6 +1,7 @@
 use reviva_core::{
-    BackendSettings, Confidence, Finding, NormalizationState, ResponseInterpretation, RevivaMode,
-    RevivaResponse, RevivaTarget, Session, Severity, SeverityOrigin,
+    BackendSettings, Confidence, Finding, NormalizationState, ProfileMetadata,
+    ResponseInterpretation, RevivaMode, RevivaResponse, RevivaTarget, Session, Severity,
+    SeverityOrigin,
 };
 use reviva_export::{export_session_json, export_session_markdown};
 
@@ -48,6 +49,12 @@ fn fixture_session() -> Session {
             raw_labels: vec!["high".to_string()],
             normalization_state: NormalizationState::Structured,
         }],
+        profile: ProfileMetadata {
+            name: "launch-readiness".to_string(),
+            source: "built_in".to_string(),
+            path: None,
+            hash: "profile-hash".to_string(),
+        },
         created_at: "1700000000".to_string(),
         warnings: vec![],
     }
@@ -64,6 +71,9 @@ fn markdown_export_snapshot() {
 - Session ID: `session-123`
 - Created At: `1700000000`
 - Mode: `boundary`
+- Profile: `launch-readiness`
+- Profile Source: `built_in`
+- Profile Hash: `profile-hash`
 - Target: `boundary:left=src/left.rs right=src/right.rs`
 
 ## Prompt
@@ -100,6 +110,7 @@ fn json_export_is_valid_and_contains_fields() {
     let json = export_session_json(&fixture_session());
     let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid json");
     assert_eq!(parsed["session"]["id"], "session-123");
+    assert_eq!(parsed["session"]["profile"]["name"], "launch-readiness");
     assert_eq!(parsed["findings"][0]["normalization_state"], "structured");
     assert_eq!(parsed["findings"][0]["severity_origin"], "model_labeled");
 }
