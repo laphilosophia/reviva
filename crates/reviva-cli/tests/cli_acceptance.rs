@@ -124,6 +124,8 @@ fn end_to_end_cli_flow_and_prompt_inspectability() {
     );
     assert!(triage_output.contains("triage.total_findings: 1"));
     assert!(triage_output.contains("triage.by_state: structured=1 partial=0 raw_only=0"));
+    assert!(triage_output.contains("triage.duplicate_summary_clusters: 0"));
+    assert!(triage_output.contains("triage.duplicate_summary_findings: 0"));
     assert!(triage_output.contains("triage.repeated_summaries: none"));
 
     let export_output = run_cmd(
@@ -711,6 +713,24 @@ fn review_incremental_from_git_ref_selects_changed_files() {
     assert!(warnings
         .iter()
         .any(|value| value.as_str() == Some("incremental_fallback_full_file_count=0")));
+
+    let session_show = run_cmd(
+        temp.path(),
+        &[
+            "session",
+            "show",
+            "--repo",
+            temp.path().to_str().expect("repo str"),
+            "--id",
+            "session-incremental",
+        ],
+    );
+    assert!(session_show.contains("incremental.enabled: true"));
+    assert!(session_show.contains("incremental.from: HEAD"));
+    assert!(session_show.contains("incremental.scope: diff_hunks"));
+    assert!(session_show.contains("incremental.context_lines: 3"));
+    assert!(session_show.contains("incremental.file_count: 1"));
+    assert!(session_show.contains("incremental.fallback_full_file_count: 0"));
 }
 
 #[test]

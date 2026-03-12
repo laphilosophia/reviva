@@ -1,7 +1,15 @@
 use reviva_core::{ResponseInterpretation, Session};
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 
 pub fn export_session_markdown(session: &Session) -> String {
+    let repeated_summaries = repeated_summary_clusters(&session.findings);
+    let duplicate_summary_findings = repeated_summaries
+        .iter()
+        .map(|(_, count)| *count)
+        .sum::<usize>();
+    let incremental = extract_incremental_warnings(&session.warnings);
+
     let mut output = String::new();
     output.push_str("# Reviva Session Export\n\n");
     output.push_str(&format!("- Session ID: `{}`\n", session.id));
@@ -58,6 +66,54 @@ pub fn export_session_markdown(session: &Session) -> String {
         output.push('\n');
     }
 
+    if let Some(incremental) = &incremental {
+        output.push_str("## Incremental Scope\n\n");
+        output.push_str("- Incremental Mode: `enabled`\n");
+        if let Some(from) = incremental.from.as_deref() {
+            output.push_str(&format!("- Base Ref: `{from}`\n"));
+        }
+        if let Some(scope) = incremental.scope.as_deref() {
+            output.push_str(&format!("- Scope: `{scope}`\n"));
+        }
+        if let Some(context_lines) = incremental.context_lines {
+            output.push_str(&format!("- Context Lines: `{context_lines}`\n"));
+        }
+        if let Some(file_count) = incremental.file_count {
+            output.push_str(&format!("- Incremental File Count: `{file_count}`\n"));
+        }
+        if let Some(fallback_count) = incremental.fallback_full_file_count {
+            output.push_str(&format!("- Full-File Fallback Count: `{fallback_count}`\n"));
+        }
+        if !incremental.fallback_full_files.is_empty() {
+            output.push_str("- Full-File Fallback Files:\n");
+            for path in &incremental.fallback_full_files {
+                output.push_str(&format!("  - `{path}`\n"));
+            }
+        }
+        output.push_str(
+            "- Scope Note: `diff_hunks` reviews git diff hunks; fallback files are reviewed as full file content.\n\n",
+        );
+    }
+
+    output.push_str("## Triage Diagnostics\n\n");
+    output.push_str(&format!(
+        "- Duplicate Summary Clusters: `{}`\n",
+        repeated_summaries.len()
+    ));
+    output.push_str(&format!(
+        "- Duplicate Summary Findings: `{}`\n",
+        duplicate_summary_findings
+    ));
+    if repeated_summaries.is_empty() {
+        output.push_str("- Repeated Summaries: `none`\n\n");
+    } else {
+        output.push_str("- Repeated Summaries:\n");
+        for (summary, count) in repeated_summaries.iter().take(5) {
+            output.push_str(&format!("  - `{count}` x `{summary}`\n"));
+        }
+        output.push('\n');
+    }
+
     output.push_str("## Findings\n\n");
     if session.findings.is_empty() {
         output.push_str("_No extracted findings._\n");
@@ -104,6 +160,12 @@ pub fn export_session_markdown(session: &Session) -> String {
 }
 
 pub fn export_session_json(session: &Session) -> String {
+    let repeated_summaries = repeated_summary_clusters(&session.findings);
+    let duplicate_summary_findings = repeated_summaries
+        .iter()
+        .map(|(_, count)| *count)
+        .sum::<usize>();
+    let incremental = extract_incremental_warnings(&session.warnings);
     let findings = session
         .findings
         .iter()
@@ -160,6 +222,21 @@ pub fn export_session_json(session: &Session) -> String {
                 "status_code": session.response.status_code,
                 "response_interpretation": response_interpretation_to_json(&session.response.response_interpretation),
                 "raw_http_body_bytes": session.response.raw_http_body.len(),
+            },
+            "incremental": incremental_to_json(incremental.as_ref()),
+            "triage": {
+                "total_findings": session.findings.len(),
+                "duplicate_summary_clusters": repeated_summaries.len(),
+                "duplicate_summary_findings": duplicate_summary_findings,
+                "repeated_summaries": repeated_summaries
+                    .iter()
+                    .map(|(summary, count)| {
+                        json!({
+                            "summary": summary,
+                            "count": count,
+                        })
+                    })
+                    .collect::<Vec<Value>>(),
             },
             "warnings": session.warnings,
             "created_at": session.created_at,
@@ -254,5 +331,98 @@ fn format_target(target: &reviva_core::RevivaTarget) -> String {
         reviva_core::RevivaTarget::Boundary(boundary) => {
             format!("boundary:left={} right={}", boundary.left, boundary.right)
         }
+    }
+}
+
+fn repeated_summary_clusters(findings: &[reviva_core::Finding]) -> Vec<(String, usize)> {
+    let mut summary_counts = BTreeMap::new();
+    for finding in findings {
+        let key = normalize_summary_for_triage(&finding.summary);
+        let count = summary_counts.entry(key).or_insert(0_usize);
+        *count += 1;
+    }
+    let mut repeats = summary_counts
+        .into_iter()
+        .filter(|(_, count)| *count > 1)
+        .collect::<Vec<_>>();
+    repeats.sort_by(|(left_summary, left_count), (right_summary, right_count)| {
+        right_count
+            .cmp(left_count)
+            .then_with(|| left_summary.cmp(right_summary))
+    });
+    repeats
+}
+
+fn normalize_summary_for_triage(summary: &str) -> String {
+    summary
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase()
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct IncrementalWarnings {
+    from: Option<String>,
+    scope: Option<String>,
+    context_lines: Option<usize>,
+    file_count: Option<usize>,
+    fallback_full_file_count: Option<usize>,
+    fallback_full_files: Vec<String>,
+}
+
+fn extract_incremental_warnings(warnings: &[String]) -> Option<IncrementalWarnings> {
+    let mut result = IncrementalWarnings::default();
+    for warning in warnings {
+        if let Some(value) = warning_value(warning, "incremental_from=") {
+            result.from = Some(value.to_string());
+            continue;
+        }
+        if let Some(value) = warning_value(warning, "incremental_scope=") {
+            result.scope = Some(value.to_string());
+            continue;
+        }
+        if let Some(value) = warning_value(warning, "incremental_context_lines=") {
+            result.context_lines = value.parse::<usize>().ok();
+            continue;
+        }
+        if let Some(value) = warning_value(warning, "incremental_file_count=") {
+            result.file_count = value.parse::<usize>().ok();
+            continue;
+        }
+        if let Some(value) = warning_value(warning, "incremental_fallback_full_file_count=") {
+            result.fallback_full_file_count = value.parse::<usize>().ok();
+            continue;
+        }
+        if let Some(value) = warning_value(warning, "incremental_fallback_full_file=") {
+            result.fallback_full_files.push(value.to_string());
+        }
+    }
+    if result.from.is_some() || result.scope.is_some() {
+        Some(result)
+    } else {
+        None
+    }
+}
+
+fn warning_value<'a>(warning: &'a str, prefix: &str) -> Option<&'a str> {
+    warning.strip_prefix(prefix)
+}
+
+fn incremental_to_json(incremental: Option<&IncrementalWarnings>) -> Value {
+    match incremental {
+        Some(value) => json!({
+            "enabled": true,
+            "from": value.from,
+            "scope": value.scope,
+            "context_lines": value.context_lines,
+            "file_count": value.file_count,
+            "fallback_full_file_count": value.fallback_full_file_count,
+            "fallback_full_files": value.fallback_full_files,
+            "scope_note": "diff_hunks reviews git diff hunks; fallback files are reviewed as full file content.",
+        }),
+        None => json!({
+            "enabled": false,
+        }),
     }
 }

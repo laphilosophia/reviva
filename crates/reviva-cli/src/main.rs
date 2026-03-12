@@ -532,6 +532,33 @@ fn cmd_session(args: &[String]) -> Result<(), String> {
                     );
                 }
             }
+            if let Some(incremental) = extract_incremental_warnings(&session.warnings) {
+                println!("incremental.enabled: true");
+                if let Some(from) = incremental.from.as_deref() {
+                    println!("incremental.from: {from}");
+                }
+                if let Some(scope) = incremental.scope.as_deref() {
+                    println!("incremental.scope: {scope}");
+                }
+                if let Some(context_lines) = incremental.context_lines {
+                    println!("incremental.context_lines: {context_lines}");
+                }
+                if let Some(file_count) = incremental.file_count {
+                    println!("incremental.file_count: {file_count}");
+                }
+                if let Some(fallback_full_file_count) = incremental.fallback_full_file_count {
+                    println!("incremental.fallback_full_file_count: {fallback_full_file_count}");
+                }
+                if !incremental.fallback_full_files.is_empty() {
+                    println!("incremental.fallback_full_files:");
+                    for path in &incremental.fallback_full_files {
+                        println!("- {path}");
+                    }
+                }
+                println!(
+                    "incremental.scope_note: diff_hunks reviews git diff hunks; fallback_full_files are reviewed as full file content."
+                );
+            }
             if !session.warnings.is_empty() {
                 println!("warnings.total: {}", session.warnings.len());
                 for warning in &session.warnings {
@@ -1632,6 +1659,23 @@ fn print_findings_triage(findings: &[reviva_core::Finding]) {
         low_confidence_high_severity
     );
 
+    let repeats = repeated_summary_clusters(findings);
+    println!("triage.duplicate_summary_clusters: {}", repeats.len());
+    println!(
+        "triage.duplicate_summary_findings: {}",
+        repeats.iter().map(|(_, count)| *count).sum::<usize>()
+    );
+    if repeats.is_empty() {
+        println!("triage.repeated_summaries: none");
+    } else {
+        println!("triage.repeated_summaries:");
+        for (summary, count) in repeats.into_iter().take(5) {
+            println!("triage.repeat: {} | {}", count, summary);
+        }
+    }
+}
+
+fn repeated_summary_clusters(findings: &[reviva_core::Finding]) -> Vec<(String, usize)> {
     let mut summary_counts = BTreeMap::new();
     for finding in findings {
         let key = normalize_summary_for_triage(&finding.summary);
@@ -1647,14 +1691,7 @@ fn print_findings_triage(findings: &[reviva_core::Finding]) {
             .cmp(left_count)
             .then_with(|| left_summary.cmp(right_summary))
     });
-    if repeats.is_empty() {
-        println!("triage.repeated_summaries: none");
-    } else {
-        println!("triage.repeated_summaries:");
-        for (summary, count) in repeats.into_iter().take(5) {
-            println!("triage.repeat: {} | {}", count, summary);
-        }
-    }
+    repeats
 }
 
 fn normalize_summary_for_triage(summary: &str) -> String {
@@ -1663,6 +1700,54 @@ fn normalize_summary_for_triage(summary: &str) -> String {
         .collect::<Vec<_>>()
         .join(" ")
         .to_ascii_lowercase()
+}
+
+#[derive(Debug, Default)]
+struct IncrementalWarnings {
+    from: Option<String>,
+    scope: Option<String>,
+    context_lines: Option<usize>,
+    file_count: Option<usize>,
+    fallback_full_file_count: Option<usize>,
+    fallback_full_files: Vec<String>,
+}
+
+fn extract_incremental_warnings(warnings: &[String]) -> Option<IncrementalWarnings> {
+    let mut result = IncrementalWarnings::default();
+    for warning in warnings {
+        if let Some(value) = warning_value(warning, "incremental_from=") {
+            result.from = Some(value.to_string());
+            continue;
+        }
+        if let Some(value) = warning_value(warning, "incremental_scope=") {
+            result.scope = Some(value.to_string());
+            continue;
+        }
+        if let Some(value) = warning_value(warning, "incremental_context_lines=") {
+            result.context_lines = value.parse::<usize>().ok();
+            continue;
+        }
+        if let Some(value) = warning_value(warning, "incremental_file_count=") {
+            result.file_count = value.parse::<usize>().ok();
+            continue;
+        }
+        if let Some(value) = warning_value(warning, "incremental_fallback_full_file_count=") {
+            result.fallback_full_file_count = value.parse::<usize>().ok();
+            continue;
+        }
+        if let Some(value) = warning_value(warning, "incremental_fallback_full_file=") {
+            result.fallback_full_files.push(value.to_string());
+        }
+    }
+    if result.from.is_some() || result.scope.is_some() {
+        Some(result)
+    } else {
+        None
+    }
+}
+
+fn warning_value<'a>(warning: &'a str, prefix: &str) -> Option<&'a str> {
+    warning.strip_prefix(prefix)
 }
 
 fn print_usage() {
@@ -1679,7 +1764,10 @@ fn print_usage() {
 
 #[cfg(test)]
 mod tests {
-    use super::{backend_health_probe_paths, is_healthy_status_code, parse_http_host_port};
+    use super::{
+        backend_health_probe_paths, extract_incremental_warnings, is_healthy_status_code,
+        parse_http_host_port,
+    };
 
     #[test]
     fn health_probe_paths_are_stable() {
@@ -1704,5 +1792,24 @@ mod tests {
         let error = parse_http_host_port("https://127.0.0.1:8080")
             .expect_err("https should be rejected for llama-server management");
         assert!(error.contains("sadece http backend"));
+    }
+
+    #[test]
+    fn extract_incremental_warnings_parses_scope_fields() {
+        let warnings = vec![
+            "incremental_from=HEAD".to_string(),
+            "incremental_scope=diff_hunks".to_string(),
+            "incremental_context_lines=3".to_string(),
+            "incremental_file_count=2".to_string(),
+            "incremental_fallback_full_file_count=1".to_string(),
+            "incremental_fallback_full_file=src/a.rs".to_string(),
+        ];
+        let parsed = extract_incremental_warnings(&warnings).expect("incremental warnings");
+        assert_eq!(parsed.from.as_deref(), Some("HEAD"));
+        assert_eq!(parsed.scope.as_deref(), Some("diff_hunks"));
+        assert_eq!(parsed.context_lines, Some(3));
+        assert_eq!(parsed.file_count, Some(2));
+        assert_eq!(parsed.fallback_full_file_count, Some(1));
+        assert_eq!(parsed.fallback_full_files, vec!["src/a.rs".to_string()]);
     }
 }

@@ -62,6 +62,42 @@ fn fixture_session() -> Session {
     }
 }
 
+fn fixture_session_with_duplicates() -> Session {
+    let mut session = fixture_session();
+    session.findings.push(Finding {
+        id: "f2".to_string(),
+        session_id: "session-123".to_string(),
+        review_mode: RevivaMode::Boundary,
+        target: "src/left.rs,src/right.rs".to_string(),
+        summary: "  boundary contract mismatch  ".to_string(),
+        why_it_matters: Some("Repeated signal".to_string()),
+        severity: Some(Severity::High),
+        severity_origin: SeverityOrigin::Normalized,
+        confidence: Confidence::Low,
+        risk_class: Some("operator-trust".to_string()),
+        action: Some("Deduplicate in triage".to_string()),
+        status: None,
+        location_hint: Some("src/adapter.rs".to_string()),
+        evidence_text: Some("same issue stated differently".to_string()),
+        raw_labels: vec!["high".to_string()],
+        normalization_state: NormalizationState::Partial,
+    });
+    session
+}
+
+fn fixture_session_with_incremental_warnings() -> Session {
+    let mut session = fixture_session();
+    session.warnings = vec![
+        "incremental_from=HEAD".to_string(),
+        "incremental_scope=diff_hunks".to_string(),
+        "incremental_context_lines=3".to_string(),
+        "incremental_file_count=2".to_string(),
+        "incremental_fallback_full_file_count=1".to_string(),
+        "incremental_fallback_full_file=src/main.rs".to_string(),
+    ];
+    session
+}
+
 #[test]
 fn markdown_export_snapshot() {
     let markdown = export_session_markdown(&fixture_session());
@@ -95,6 +131,12 @@ SUMMARY:
 
 - Raw Body Bytes (stored in session): `16`
 
+## Triage Diagnostics
+
+- Duplicate Summary Clusters: `0`
+- Duplicate Summary Findings: `0`
+- Repeated Summaries: `none`
+
 ## Findings
 
 ### Boundary contract mismatch
@@ -123,9 +165,60 @@ fn json_export_is_valid_and_contains_fields() {
         "completed"
     );
     assert!(parsed["session"]["response"]["raw_http_body"].is_null());
+    assert_eq!(parsed["session"]["incremental"]["enabled"], false);
+    assert_eq!(parsed["session"]["triage"]["total_findings"], 1);
+    assert_eq!(parsed["session"]["triage"]["duplicate_summary_clusters"], 0);
+    assert_eq!(parsed["session"]["triage"]["duplicate_summary_findings"], 0);
     assert_eq!(parsed["session"]["prompt"]["stored_in_session"], true);
     assert_eq!(parsed["session"]["prompt"]["preview_equals_sent"], true);
     assert_eq!(parsed["session"]["prompt"]["chars"], 6);
     assert_eq!(parsed["findings"][0]["normalization_state"], "structured");
     assert_eq!(parsed["findings"][0]["severity_origin"], "model_labeled");
+}
+
+#[test]
+fn json_export_reports_duplicate_summary_clusters() {
+    let json = export_session_json(&fixture_session_with_duplicates());
+    let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid json");
+    assert_eq!(parsed["session"]["triage"]["total_findings"], 2);
+    assert_eq!(parsed["session"]["triage"]["duplicate_summary_clusters"], 1);
+    assert_eq!(parsed["session"]["triage"]["duplicate_summary_findings"], 2);
+    assert_eq!(
+        parsed["session"]["triage"]["repeated_summaries"][0]["count"],
+        2
+    );
+    assert_eq!(
+        parsed["session"]["triage"]["repeated_summaries"][0]["summary"],
+        "boundary contract mismatch"
+    );
+}
+
+#[test]
+fn markdown_export_surfaces_incremental_scope_when_present() {
+    let markdown = export_session_markdown(&fixture_session_with_incremental_warnings());
+    assert!(markdown.contains("## Incremental Scope"));
+    assert!(markdown.contains("- Incremental Mode: `enabled`"));
+    assert!(markdown.contains("- Base Ref: `HEAD`"));
+    assert!(markdown.contains("- Scope: `diff_hunks`"));
+    assert!(markdown.contains("- Full-File Fallback Count: `1`"));
+    assert!(markdown.contains("`src/main.rs`"));
+}
+
+#[test]
+fn json_export_surfaces_incremental_scope_when_present() {
+    let json = export_session_json(&fixture_session_with_incremental_warnings());
+    let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid json");
+    assert_eq!(parsed["session"]["incremental"]["enabled"], true);
+    assert_eq!(parsed["session"]["incremental"]["from"], "HEAD");
+    assert_eq!(parsed["session"]["incremental"]["scope"], "diff_hunks");
+    assert_eq!(parsed["session"]["incremental"]["context_lines"], 3);
+    assert_eq!(parsed["session"]["incremental"]["file_count"], 2);
+    assert_eq!(
+        parsed["session"]["incremental"]["fallback_full_file_count"],
+        1
+    );
+    assert_eq!(
+        parsed["session"]["incremental"]["fallback_full_files"][0],
+        "src/main.rs"
+    );
 }

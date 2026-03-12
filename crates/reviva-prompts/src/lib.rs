@@ -476,6 +476,12 @@ pub fn build_prompt(
         }
     ));
     prompt.push_str("Estimated token budget is heuristic, not exact.\n\n");
+    prompt.push_str("Findings policy:\n");
+    prompt.push_str("- Prefer underclaiming to speculation.\n");
+    prompt.push_str(
+        "- Report findings only when location and evidence are concrete in provided files.\n",
+    );
+    prompt.push_str("- If evidence is weak, use the lowest confidence label and explain uncertainty in `why`.\n\n");
 
     if let Some(note) = note {
         prompt.push_str("User note:\n");
@@ -863,7 +869,7 @@ fn parse_model_severity(
     label: &str,
     profile: &ReviewProfileSpec,
 ) -> Option<(Severity, SeverityOrigin)> {
-    let normalized = label.trim().to_ascii_lowercase().replace(['_', ' '], "-");
+    let normalized = normalize_model_label(label);
     if is_explicit_unknown_severity(&normalized) {
         return None;
     }
@@ -872,9 +878,22 @@ fn parse_model_severity(
         "medium" => Some((Severity::Medium, SeverityOrigin::ModelLabeled)),
         "high" => Some((Severity::High, SeverityOrigin::ModelLabeled)),
         "critical" => Some((Severity::Critical, SeverityOrigin::ModelLabeled)),
-        "release-blocker" | "blocker" => Some((Severity::Critical, SeverityOrigin::Normalized)),
-        "pre-launch-fix" | "must-fix" => Some((Severity::High, SeverityOrigin::Normalized)),
-        "post-launch-watch" | "watch" => Some((Severity::Medium, SeverityOrigin::Normalized)),
+        "release-blocker"
+        | "blocker"
+        | "launch-blocker"
+        | "ship-blocker"
+        | "release-critical"
+        | "must-fix-now"
+        | "must-fix-immediately" => Some((Severity::Critical, SeverityOrigin::Normalized)),
+        "pre-launch-fix"
+        | "prelaunch-fix"
+        | "pre-launch"
+        | "must-fix"
+        | "needs-fix-before-launch"
+        | "launch-fix" => Some((Severity::High, SeverityOrigin::Normalized)),
+        "post-launch-watch" | "postlaunch-watch" | "post-launch-monitor" | "watch" | "monitor" => {
+            Some((Severity::Medium, SeverityOrigin::Normalized))
+        }
         _ => profile
             .severity_scale
             .iter()
@@ -889,14 +908,15 @@ fn parse_model_severity(
 }
 
 fn parse_model_confidence(value: &str, profile: &ReviewProfileSpec) -> Confidence {
-    let normalized = value.trim().to_ascii_lowercase().replace(['_', ' '], "-");
+    let normalized = normalize_model_label(value);
     match normalized.as_str() {
         "low" => Confidence::Low,
         "medium" => Confidence::Medium,
         "high" => Confidence::High,
-        "definite" | "certain" => Confidence::High,
-        "likely" | "probable" => Confidence::Medium,
-        "uncertain" | "unsure" => Confidence::Low,
+        "definite" | "certain" | "confirmed" => Confidence::High,
+        "likely" | "probable" | "plausible" => Confidence::Medium,
+        "uncertain" | "unsure" | "tentative" | "possible" | "speculative" => Confidence::Low,
+        "unknown" | "unrated" | "na" | "n/a" => Confidence::Unknown,
         _ => profile
             .confidence_scale
             .iter()
@@ -1004,12 +1024,15 @@ fn looks_like_field_line(normalized_line: &str) -> bool {
 }
 
 fn is_explicit_unknown_confidence(value: &str) -> bool {
-    value.trim().eq_ignore_ascii_case("unknown")
+    matches!(
+        normalize_model_label(value).as_str(),
+        "unknown" | "unrated" | "na" | "n/a"
+    )
 }
 
 fn is_explicit_unknown_severity(value: &str) -> bool {
     matches!(
-        normalize_label(value).as_str(),
+        normalize_model_label(value).as_str(),
         "unknown" | "unrated" | "na" | "n/a"
     )
 }
@@ -1024,6 +1047,24 @@ fn format_scale(scale: &[String], fallback: &str) -> String {
 
 fn normalize_label(value: &str) -> String {
     value.trim().to_ascii_lowercase().replace(['_', ' '], "-")
+}
+
+fn normalize_model_label(value: &str) -> String {
+    let mut normalized = normalize_label(value);
+    if let Some((head, _)) = normalized.split_once('(') {
+        normalized = head.trim().to_string();
+    }
+    while normalized.contains("--") {
+        normalized = normalized.replace("--", "-");
+    }
+    normalized
+        .trim_matches(|character: char| {
+            matches!(
+                character,
+                '-' | '.' | ',' | ';' | ':' | '!' | '?' | '"' | '\'' | '`'
+            )
+        })
+        .to_string()
 }
 
 fn severity_from_scale_index(index: usize, scale_len: usize) -> Severity {

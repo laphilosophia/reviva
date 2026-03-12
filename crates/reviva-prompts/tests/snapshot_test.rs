@@ -1,8 +1,9 @@
 use reviva_core::{BoundaryTarget, RevivaMode, RevivaTarget};
 use reviva_prompts::{
-    apply_prompt_wrapper, build_prompt, default_review_profile, normalize_findings,
-    normalize_findings_for_profile_with_reasons, normalize_findings_with_reasons,
-    parse_prompt_wrapper, parse_review_profile_toml, PromptBuildConfig, PromptFile, PromptWrapper,
+    apply_prompt_wrapper, build_prompt, built_in_review_profile, default_review_profile,
+    normalize_findings, normalize_findings_for_profile_with_reasons,
+    normalize_findings_with_reasons, parse_prompt_wrapper, parse_review_profile_toml,
+    PromptBuildConfig, PromptFile, PromptWrapper,
 };
 
 fn base_file(path: &str) -> PromptFile {
@@ -71,6 +72,11 @@ Profile risk classes: correctness, security, memory, performance, maintainabilit
 Focus: Inspect trust boundaries, adapter leakage, normalization drift, and ownership ambiguity.
 Target: boundary:left=src/left.rs right=src/right.rs
 Estimated token budget is heuristic, not exact.
+
+Findings policy:
+- Prefer underclaiming to speculation.
+- Report findings only when location and evidence are concrete in provided files.
+- If evidence is weak, use the lowest confidence label and explain uncertainty in `why`.
 
 Selected files:
 - src/left.rs (estimated_tokens=12 )
@@ -189,6 +195,70 @@ fn launch_labels_map_to_canonical_enums() {
     assert_eq!(findings[0].severity_origin.as_str(), "normalized");
     assert_eq!(findings[0].confidence.as_str(), "high");
     assert_eq!(findings[0].risk_class.as_deref(), Some("operator-trust"));
+}
+
+#[test]
+fn launch_label_variants_are_accepted() {
+    let profile =
+        built_in_review_profile("launch-readiness").expect("launch-readiness profile must exist");
+    let output = "SUMMARY:\n- ok\nFINDINGS:\n- summary: Release gate\nseverity: release blocker\nconfidence: definite.\nlocation: src/main.rs\nevidence: startup path\nwhy: startup can fail\naction: tighten default\n- summary: Needs prelaunch fix\nseverity: prelaunch-fix\nconfidence: likely\nlocation: src/main.rs\nevidence: fallback branch\nwhy: operator confusion\naction: make explicit\n- summary: Watch after launch\nseverity: post-launch-monitor\nconfidence: uncertain\nlocation: src/main.rs\nevidence: dynamic branch\nwhy: low confidence drift\naction: add observability\n- summary: Another blocker\nseverity: \"ship-blocker\"\nconfidence: confirmed\nlocation: src/main.rs\nevidence: implicit global\nwhy: hidden coupling\naction: isolate state\n";
+    let report = normalize_findings_for_profile_with_reasons(
+        &profile,
+        "s8",
+        RevivaMode::LaunchReadiness,
+        "src/main.rs",
+        output,
+    );
+    assert_eq!(report.state.as_str(), "structured");
+    assert_eq!(report.findings.len(), 4);
+    assert!(report.reason_tags.is_empty());
+    assert_eq!(
+        report.findings[0].severity.as_ref().map(|v| v.as_str()),
+        Some("critical")
+    );
+    assert_eq!(report.findings[0].confidence.as_str(), "high");
+    assert_eq!(
+        report.findings[1].severity.as_ref().map(|v| v.as_str()),
+        Some("high")
+    );
+    assert_eq!(report.findings[1].confidence.as_str(), "medium");
+    assert_eq!(
+        report.findings[2].severity.as_ref().map(|v| v.as_str()),
+        Some("medium")
+    );
+    assert_eq!(report.findings[2].confidence.as_str(), "low");
+    assert_eq!(
+        report.findings[3].severity.as_ref().map(|v| v.as_str()),
+        Some("critical")
+    );
+    assert_eq!(report.findings[3].confidence.as_str(), "high");
+    assert!(report
+        .findings
+        .iter()
+        .all(|finding| finding.severity_origin.as_str() == "normalized"));
+}
+
+#[test]
+fn invalid_launch_labels_are_tagged() {
+    let profile =
+        built_in_review_profile("launch-readiness").expect("launch-readiness profile must exist");
+    let output = "SUMMARY:\n- ok\nFINDINGS:\n- summary: Unsupported labels\nseverity: release-gate\nconfidence: maybe-sure\nlocation: src/main.rs\nevidence: startup\nwhy: unclear\naction: clarify\n";
+    let report = normalize_findings_for_profile_with_reasons(
+        &profile,
+        "s9",
+        RevivaMode::LaunchReadiness,
+        "src/main.rs",
+        output,
+    );
+    assert_eq!(report.state.as_str(), "partial");
+    assert!(report
+        .reason_tags
+        .iter()
+        .any(|tag| tag == "invalid_severity_label"));
+    assert!(report
+        .reason_tags
+        .iter()
+        .any(|tag| tag == "invalid_confidence_label"));
 }
 
 #[test]
