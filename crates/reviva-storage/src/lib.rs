@@ -3,6 +3,7 @@ use reviva_core::{
     ProfileMetadata, RevivaMode, RevivaResponse, RevivaTarget, Session, Severity, SeverityOrigin,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -101,6 +102,7 @@ impl Storage {
         fs::create_dir_all(self.root.join("sessions"))
             .and_then(|_| fs::create_dir_all(self.root.join("sets")))
             .and_then(|_| fs::create_dir_all(self.root.join("findings")))
+            .and_then(|_| fs::create_dir_all(self.root.join("cache")))
             .and_then(|_| fs::create_dir_all(self.root.join("exports")))
             .map_err(|error| StorageError::Io(error.to_string()))
     }
@@ -244,6 +246,41 @@ impl Storage {
             findings.extend(session.findings);
         }
         Ok(findings)
+    }
+
+    pub fn load_review_cache_session_id(&self, key: &str) -> Result<Option<String>, StorageError> {
+        let cache = self.load_review_cache()?;
+        Ok(cache.entries.get(key).cloned())
+    }
+
+    pub fn save_review_cache_session_id(
+        &self,
+        key: &str,
+        session_id: &str,
+    ) -> Result<(), StorageError> {
+        self.init()?;
+        let mut cache = self.load_review_cache()?;
+        cache
+            .entries
+            .insert(key.to_string(), session_id.to_string());
+        let json = serde_json::to_string_pretty(&cache)
+            .map_err(|error| StorageError::Serialize(error.to_string()))?;
+        fs::write(self.review_cache_path(), json)
+            .map_err(|error| StorageError::Io(error.to_string()))
+    }
+
+    fn load_review_cache(&self) -> Result<ReviewCacheDto, StorageError> {
+        let path = self.review_cache_path();
+        if !path.exists() {
+            return Ok(ReviewCacheDto::default());
+        }
+        let content =
+            fs::read_to_string(path).map_err(|error| StorageError::Io(error.to_string()))?;
+        serde_json::from_str(&content).map_err(|error| StorageError::Deserialize(error.to_string()))
+    }
+
+    fn review_cache_path(&self) -> PathBuf {
+        self.root.join("cache").join("review-cache.json")
     }
 }
 
@@ -577,6 +614,12 @@ struct FindingDto {
     evidence_text: Option<String>,
     raw_labels: Vec<String>,
     normalization_state: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Default)]
+struct ReviewCacheDto {
+    #[serde(default)]
+    entries: BTreeMap<String, String>,
 }
 
 impl From<Finding> for FindingDto {

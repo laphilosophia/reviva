@@ -132,6 +132,108 @@ fn end_to_end_cli_flow_and_prompt_inspectability() {
     let session_json = fs::read_to_string(&session_json_path).expect("session json");
     let parsed: Value = serde_json::from_str(&session_json).expect("valid session json");
     assert_eq!(parsed["prompt_preview"], parsed["prompt_sent"]);
+    let warnings = parsed["warnings"].as_array().expect("warnings array");
+    assert!(warnings
+        .iter()
+        .any(|value| value.as_str() == Some("mode_source=cli_mode")));
+    assert!(warnings
+        .iter()
+        .any(|value| value.as_str() == Some("llama_server_action=non_local_backend_ignored")));
+}
+
+#[test]
+fn exact_hit_review_cache_skips_second_backend_call() {
+    let temp = TempDir::new().expect("tempdir");
+    fs::create_dir_all(temp.path().join("src")).expect("mkdir");
+    fs::write(
+        temp.path().join("src/main.rs"),
+        "fn main() { println!(\"hello\"); }\n",
+    )
+    .expect("write");
+
+    let server = MockServer::start();
+    let completion = server.mock(|when, then| {
+        when.method(POST).path("/completion");
+        then.status(200).header("content-type", "application/json").body(
+            r#"{
+                "content": "SUMMARY:\n- ok\nFINDINGS:\n- summary: Missing guard\nseverity: high\nconfidence: medium\nlocation: src/main.rs\nevidence: no check\nwhy: crash risk\naction: add guard\n"
+            }"#,
+        );
+    });
+
+    fs::create_dir_all(temp.path().join(".reviva")).expect("mkdir");
+    fs::write(
+        temp.path().join(".reviva/config.toml"),
+        format!(
+            "backend_url = \"{}\"\nmodel = \"test\"\ntimeout_ms = 10000\nmax_tokens = 512\ntemperature = 0.1\nstop_sequences = []\nmax_file_bytes = 262144\nestimated_prompt_tokens = 16000\n",
+            server.url("")
+        ),
+    )
+    .expect("config");
+
+    let first = Command::new(env!("CARGO_BIN_EXE_reviva"))
+        .args([
+            "review",
+            "--repo",
+            temp.path().to_str().expect("repo str"),
+            "--mode",
+            "contract",
+            "--file",
+            "src/main.rs",
+        ])
+        .env("REVIVA_TEST_SESSION_ID", "session-cache-1")
+        .env("REVIVA_TEST_TIMESTAMP", "1700000000")
+        .current_dir(temp.path())
+        .output()
+        .expect("run first review");
+    assert!(
+        first.status.success(),
+        "first review failed stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&first.stdout),
+        String::from_utf8_lossy(&first.stderr)
+    );
+
+    let second = Command::new(env!("CARGO_BIN_EXE_reviva"))
+        .args([
+            "review",
+            "--repo",
+            temp.path().to_str().expect("repo str"),
+            "--mode",
+            "contract",
+            "--file",
+            "src/main.rs",
+        ])
+        .env("REVIVA_TEST_SESSION_ID", "session-cache-2")
+        .env("REVIVA_TEST_TIMESTAMP", "1700000001")
+        .current_dir(temp.path())
+        .output()
+        .expect("run second review");
+    assert!(
+        second.status.success(),
+        "second review failed stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&second.stdout),
+        String::from_utf8_lossy(&second.stderr)
+    );
+
+    assert_eq!(completion.hits(), 1, "second review must be cache hit");
+
+    let session_two_json_path = temp
+        .path()
+        .join(".reviva")
+        .join("sessions")
+        .join("session-cache-2.json");
+    let session_two_json = fs::read_to_string(&session_two_json_path).expect("session json");
+    let parsed: Value = serde_json::from_str(&session_two_json).expect("valid session json");
+    let warnings = parsed["warnings"].as_array().expect("warnings array");
+    assert!(warnings
+        .iter()
+        .any(|value| value.as_str() == Some("review_cache=hit")));
+    assert!(warnings
+        .iter()
+        .any(|value| value.as_str() == Some("llama_server_action=cache_hit_backend_skipped")));
+    assert!(warnings
+        .iter()
+        .any(|value| value.as_str() == Some("review_cache_source=session-cache-1")));
 }
 
 #[test]
@@ -203,6 +305,73 @@ fn qwen_chatml_wrapper_keeps_preview_equal_to_sent_prompt() {
         .expect("warnings")
         .iter()
         .any(|value| value.as_str() == Some("prompt_wrapper=qwen-chatml")));
+}
+
+#[test]
+fn review_without_mode_uses_profile_name_mapping() {
+    let temp = TempDir::new().expect("tempdir");
+    fs::create_dir_all(temp.path().join("src")).expect("mkdir");
+    fs::write(
+        temp.path().join("src/main.rs"),
+        "fn main() { println!(\"hello\"); }\n",
+    )
+    .expect("write");
+
+    let server = MockServer::start();
+    server.mock(|when, then| {
+        when.method(POST).path("/completion");
+        then.status(200).header("content-type", "application/json").body(
+            r#"{
+                "content": "SUMMARY:\n- ok\nFINDINGS:\n- summary: Launch check\nseverity: medium\nconfidence: low\nlocation: src/main.rs\nevidence: startup path\nwhy: release risk\naction: verify\n"
+            }"#,
+        );
+    });
+
+    fs::create_dir_all(temp.path().join(".reviva")).expect("mkdir");
+    fs::write(
+        temp.path().join(".reviva/config.toml"),
+        format!(
+            "backend_url = \"{}\"\nmodel = \"test\"\ntimeout_ms = 10000\nmax_tokens = 512\ntemperature = 0.1\nstop_sequences = []\nmax_file_bytes = 262144\nestimated_prompt_tokens = 16000\n",
+            server.url("")
+        ),
+    )
+    .expect("config");
+
+    let review_output = Command::new(env!("CARGO_BIN_EXE_reviva"))
+        .args([
+            "review",
+            "--repo",
+            temp.path().to_str().expect("repo str"),
+            "--profile",
+            "launch-readiness",
+            "--file",
+            "src/main.rs",
+        ])
+        .env("REVIVA_TEST_SESSION_ID", "session-mode-profile")
+        .env("REVIVA_TEST_TIMESTAMP", "1700000000")
+        .current_dir(temp.path())
+        .output()
+        .expect("run review");
+    assert!(
+        review_output.status.success(),
+        "review failed stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&review_output.stdout),
+        String::from_utf8_lossy(&review_output.stderr)
+    );
+
+    let session_json_path = temp
+        .path()
+        .join(".reviva")
+        .join("sessions")
+        .join("session-mode-profile.json");
+    let session_json = fs::read_to_string(&session_json_path).expect("session json");
+    let parsed: Value = serde_json::from_str(&session_json).expect("valid session json");
+    assert_eq!(parsed["review_mode"], "launch-readiness");
+    assert!(parsed["warnings"]
+        .as_array()
+        .expect("warnings")
+        .iter()
+        .any(|value| value.as_str() == Some("mode_source=profile_name")));
 }
 
 #[test]

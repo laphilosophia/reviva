@@ -32,6 +32,7 @@ Core principles:
 - `review` a file, file set, or boundary pair
 - use built-in or file-based review profiles
 - inspect prompt before execution
+- reuse exact prompt/backend hits via local review cache
 - list and inspect sessions/findings
 - export session output to Markdown or JSON
 
@@ -48,6 +49,22 @@ operator-correctness
 launch-readiness
 maintainability
 ```
+
+## Mode vs Profile
+
+Reviva separates two concepts:
+
+- `mode`: coarse review lens (contract, boundary, launch-readiness, etc.)
+- `profile`: review policy (rules, vocabulary, confidence/severity scales, risk classes)
+
+`mode` is optional. Resolution order:
+
+1. `--mode` (explicit)
+2. profile name if it matches a mode
+3. first profile focus token that matches a mode
+4. fallback: `contract`
+
+This keeps fast presets available while allowing profile-driven control.
 
 ## Requirements
 
@@ -105,7 +122,7 @@ reviva export --repo /path/to/repo --session <SESSION_ID> --format json
 
 ```text
 reviva scan [--repo PATH]
-reviva review --repo PATH --mode MODE [--profile NAME] [--profile-file PATH] [--file PATH]... [--boundary-left PATH --boundary-right PATH] [--note TEXT] [--prompt-wrapper plain|qwen-chatml] [--kv-cache on|off] [--kv-slot SLOT_ID] [--llama-lifecycle manual|ensure-running|ensure-running-and-stop] [--preview-only] [--llama-model-path PATH_OR_DIR] [--llama-server-path PATH]
+reviva review --repo PATH [--mode MODE] [--profile NAME] [--profile-file PATH] [--file PATH]... [--boundary-left PATH --boundary-right PATH] [--note TEXT] [--prompt-wrapper plain|qwen-chatml] [--kv-cache on|off] [--kv-slot SLOT_ID] [--llama-lifecycle manual|ensure-running|ensure-running-and-stop] [--preview-only] [--llama-model-path PATH_OR_DIR] [--llama-server-path PATH]
 reviva set save --repo PATH --name NAME --file PATH...
 reviva set load --repo PATH --name NAME
 reviva set list --repo PATH
@@ -142,6 +159,7 @@ Notes:
 
 - `prompt_wrapper` defaults to `plain` if omitted.
 - Use `qwen-chatml` only for backends/models that expect ChatML-style prompting.
+- `mode` is optional; if omitted, Reviva derives it from profile name/focus then falls back to `contract`.
 - `llama_lifecycle_policy` defaults to `ensure-running-and-stop` if omitted.
 - `llama_kv_cache` defaults to `false` if omitted.
 - `llama_slot_id` is optional; set it to pin repeated reviews to a stable llama-server slot.
@@ -187,6 +205,11 @@ Reviva persists data under:
 
 Session is the canonical truth source. Raw backend response is always preserved.
 
+Reviva also keeps a derived local review cache (`.reviva/cache/review-cache.json`) keyed by prompt+backend identity:
+
+- cache hit: backend call is skipped and cached raw response is reused
+- cache miss: backend is called and cache is updated after session save
+
 Finding normalization state is explicit:
 
 - `structured`
@@ -201,6 +224,7 @@ If normalization is partial/raw-only, warnings are stored with reason tags.
 - backend timeouts/unreachable: verify `backend_url`, server status, and timeout settings.
 - prompt budget refusal: narrow target selection or shorten `--note`.
 - empty findings with non-empty response: verify output contract adherence and wrapper choice.
+- repeated review unexpectedly misses cache: check `review_cache_key` and backend/profile/mode/prompt changes in session warnings.
 
 ## Development
 

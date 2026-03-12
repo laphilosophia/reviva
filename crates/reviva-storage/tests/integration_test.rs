@@ -123,3 +123,24 @@ fn corrupted_session_file_returns_deserialize_error() {
     let error = storage.load_session("bad").expect_err("must fail");
     assert!(matches!(error, StorageError::Deserialize(_)));
 }
+
+#[test]
+fn review_cache_session_link_roundtrip() {
+    let temp = TempDir::new().expect("tempdir");
+    let storage = Storage::new(temp.path());
+    storage.init().expect("init");
+
+    storage
+        .save_review_cache_session_id("key-1", "session-123")
+        .expect("save cache link");
+
+    let cached = storage
+        .load_review_cache_session_id("key-1")
+        .expect("load cache link");
+    assert_eq!(cached.as_deref(), Some("session-123"));
+
+    let missing = storage
+        .load_review_cache_session_id("missing")
+        .expect("load missing");
+    assert_eq!(missing, None);
+}

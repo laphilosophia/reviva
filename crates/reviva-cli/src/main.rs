@@ -1,7 +1,7 @@
 use reviva_backend::{CompletionBackend, LlamaCompletionBackend};
 use reviva_core::{
     BackendSettings, BoundaryTarget, NamedSet, ProfileMetadata, ResponseInterpretation, RevivaMode,
-    RevivaRequest, RevivaTarget, Session,
+    RevivaRequest, RevivaResponse, RevivaTarget, Session,
 };
 use reviva_export::{export_session_json, export_session_markdown};
 use reviva_prompts::{
@@ -78,7 +78,7 @@ fn cmd_scan(args: &[String]) -> Result<(), String> {
 
 fn cmd_review(args: &[String]) -> Result<(), String> {
     let repo = parse_repo_arg(args)?;
-    let mode = parse_mode_arg(args)?;
+    let mode_arg = parse_optional_arg(args, "--mode");
     let profile = parse_optional_arg(args, "--profile");
     let profile_file = parse_optional_arg(args, "--profile-file");
     let note = parse_optional_arg(args, "--note");
@@ -135,6 +135,7 @@ fn cmd_review(args: &[String]) -> Result<(), String> {
         config.review_profile.as_deref(),
         config.review_profile_file.as_deref(),
     )?;
+    let (mode, mode_source) = resolve_review_mode(mode_arg.as_deref(), &resolved_profile.spec)?;
     let target = resolve_target(&repo, args, files, boundary_left, boundary_right)?;
     let repo_config = RepoScanConfig {
         max_file_bytes: config.max_file_bytes,
@@ -199,20 +200,55 @@ fn cmd_review(args: &[String]) -> Result<(), String> {
         backend: backend_settings.clone(),
         prompt: wrapped_prompt.clone(),
     };
-    let llama_server_outcome =
-        ensure_llama_server(&storage, &mut config, &backend_settings, llama_lifecycle)
-            .map_err(|error| format!("llama-server preflight failed: {error}"))?;
-    let _llama_server_guard = llama_server_outcome.guard;
-    let backend = LlamaCompletionBackend::new();
-    let response = backend
-        .complete(&request)
-        .map_err(|error| error.to_string())?;
-
-    let model_output = match &response.response_interpretation {
-        ResponseInterpretation::Completed { content } => content.clone(),
-        ResponseInterpretation::Empty => String::new(),
-        ResponseInterpretation::Malformed { reason } => reason.clone(),
+    let cache_key = build_review_cache_key(&request);
+    let cached_session_id = match storage.load_review_cache_session_id(&cache_key) {
+        Ok(value) => value,
+        Err(error) => {
+            eprintln!("warning: review cache read failed: {error}");
+            None
+        }
     };
+    let mut review_cache_source = None::<String>;
+    let (response, llama_server_action, llama_server_guard) =
+        if let Some(cache_session_id) = cached_session_id {
+            match storage.load_session(&cache_session_id) {
+                Ok(cached_session) => {
+                    eprintln!(
+                        "review-cache: hit (source session: {cache_session_id}), backend skipped"
+                    );
+                    review_cache_source = Some(cache_session_id);
+                    (
+                        cached_session.response,
+                        LlamaServerAction::CacheHitBackendSkipped,
+                        LlamaServerGuard::noop(),
+                    )
+                }
+                Err(error) => {
+                    eprintln!(
+                        "warning: review cache entry is stale and will be ignored: {} ({error})",
+                        cache_session_id
+                    );
+                    execute_backend_review(
+                        &storage,
+                        &mut config,
+                        &backend_settings,
+                        llama_lifecycle,
+                        &request,
+                    )?
+                }
+            }
+        } else {
+            execute_backend_review(
+                &storage,
+                &mut config,
+                &backend_settings,
+                llama_lifecycle,
+                &request,
+            )?
+        };
+    let _llama_server_guard = llama_server_guard;
+
+    let model_output = response_content_for_normalization(&response);
     let session_id = session_id();
     let normalization_report = normalize_findings_with_reasons(
         &session_id,
@@ -227,14 +263,21 @@ fn cmd_review(args: &[String]) -> Result<(), String> {
     }
 
     let mut warnings = vec![
+        format!("mode_source={mode_source}"),
         format!("profile={}", resolved_profile.spec.name),
         format!("profile_source={}", resolved_profile.source),
         format!("prompt_wrapper={}", prompt_wrapper.as_str()),
         format!("llama_lifecycle={}", llama_lifecycle.as_str()),
+        format!("llama_server_action={}", llama_server_action.as_str()),
         format!(
-            "llama_server_action={}",
-            llama_server_outcome.action.as_str()
+            "review_cache={}",
+            if review_cache_source.is_some() {
+                "hit"
+            } else {
+                "miss"
+            }
         ),
+        format!("review_cache_key={cache_key}"),
         format!("kv_cache={}", if kv_cache_enabled { "on" } else { "off" }),
         format!(
             "kv_slot={}",
@@ -247,6 +290,9 @@ fn cmd_review(args: &[String]) -> Result<(), String> {
             estimated_target_tokens(&loaded, note.as_deref())
         ),
     ];
+    if let Some(source) = &review_cache_source {
+        warnings.push(format!("review_cache_source={source}"));
+    }
     for reason in normalization_report.reason_tags {
         warnings.push(format!("normalization_reason={reason}"));
     }
@@ -273,6 +319,9 @@ fn cmd_review(args: &[String]) -> Result<(), String> {
     let session_path = storage
         .save_session(&session)
         .map_err(|error| error.to_string())?;
+    if let Err(error) = storage.save_review_cache_session_id(&cache_key, &session_id) {
+        eprintln!("warning: review cache write failed: {error}");
+    }
 
     println!("session saved: {}", session_path.display());
     println!("normalization_state: {}", normalization_state.as_str());
@@ -530,6 +579,7 @@ enum LlamaServerAction {
     ReusedActiveServer,
     StartedKeepRunning,
     StartedAndStopOnExit,
+    CacheHitBackendSkipped,
 }
 
 impl LlamaServerAction {
@@ -540,6 +590,7 @@ impl LlamaServerAction {
             Self::ReusedActiveServer => "reused_active_server",
             Self::StartedKeepRunning => "started_keep_running",
             Self::StartedAndStopOnExit => "started_and_stop_on_exit",
+            Self::CacheHitBackendSkipped => "cache_hit_backend_skipped",
         }
     }
 }
@@ -652,6 +703,26 @@ fn ensure_llama_server(
         guard: LlamaServerGuard::started(child),
         action: LlamaServerAction::StartedAndStopOnExit,
     })
+}
+
+fn execute_backend_review(
+    storage: &Storage,
+    config: &mut AppConfig,
+    backend_settings: &BackendSettings,
+    policy: LlamaLifecyclePolicy,
+    request: &RevivaRequest,
+) -> Result<(RevivaResponse, LlamaServerAction, LlamaServerGuard), String> {
+    let llama_server_outcome = ensure_llama_server(storage, config, backend_settings, policy)
+        .map_err(|error| format!("llama-server preflight failed: {error}"))?;
+    let backend = LlamaCompletionBackend::new();
+    let response = backend
+        .complete(request)
+        .map_err(|error| error.to_string())?;
+    Ok((
+        response,
+        llama_server_outcome.action,
+        llama_server_outcome.guard,
+    ))
 }
 
 fn should_manage_llama_server(base_url: &str) -> bool {
@@ -861,6 +932,14 @@ fn http_status_probe(host: &str, port: u16, path: &str, timeout: Duration) -> Op
     status_token.parse::<u16>().ok()
 }
 
+fn response_content_for_normalization(response: &RevivaResponse) -> String {
+    match &response.response_interpretation {
+        ResponseInterpretation::Completed { content } => content.clone(),
+        ResponseInterpretation::Empty => String::new(),
+        ResponseInterpretation::Malformed { reason } => reason.clone(),
+    }
+}
+
 fn parse_repo_arg(args: &[String]) -> Result<PathBuf, String> {
     let repo = parse_optional_arg(args, "--repo").unwrap_or_else(|| ".".to_string());
     PathBuf::from(repo)
@@ -868,10 +947,25 @@ fn parse_repo_arg(args: &[String]) -> Result<PathBuf, String> {
         .map_err(|error| format!("cannot resolve repository path: {error}"))
 }
 
-fn parse_mode_arg(args: &[String]) -> Result<RevivaMode, String> {
-    let mode = parse_required_arg(args, "--mode")?;
-    mode.parse::<RevivaMode>()
-        .map_err(|error| error.to_string())
+fn resolve_review_mode(
+    mode_arg: Option<&str>,
+    profile: &ReviewProfileSpec,
+) -> Result<(RevivaMode, &'static str), String> {
+    if let Some(raw) = mode_arg {
+        let parsed = raw
+            .parse::<RevivaMode>()
+            .map_err(|error| error.to_string())?;
+        return Ok((parsed, "cli_mode"));
+    }
+    if let Ok(parsed) = profile.name.parse::<RevivaMode>() {
+        return Ok((parsed, "profile_name"));
+    }
+    for token in &profile.focus {
+        if let Ok(parsed) = token.parse::<RevivaMode>() {
+            return Ok((parsed, "profile_focus"));
+        }
+    }
+    Ok((RevivaMode::Contract, "default_contract"))
 }
 
 fn resolve_prompt_wrapper(value: Option<&str>) -> Result<PromptWrapper, String> {
@@ -975,6 +1069,47 @@ fn fnv1a64_hex(value: &str) -> String {
     format!("{hash:016x}")
 }
 
+fn build_review_cache_key(request: &RevivaRequest) -> String {
+    let mut material = String::new();
+    material.push_str("reviva-review-cache-v1\n");
+    material.push_str("base_url=");
+    material.push_str(&request.backend.base_url);
+    material.push('\n');
+    material.push_str("model=");
+    material.push_str(request.backend.model.as_deref().unwrap_or(""));
+    material.push('\n');
+    material.push_str("temperature=");
+    material.push_str(&request.backend.temperature.to_string());
+    material.push('\n');
+    material.push_str("max_tokens=");
+    material.push_str(&request.backend.max_tokens.to_string());
+    material.push('\n');
+    material.push_str("timeout_ms=");
+    material.push_str(&request.backend.timeout_ms.to_string());
+    material.push('\n');
+    material.push_str("cache_prompt=");
+    material.push_str(if request.backend.cache_prompt {
+        "true"
+    } else {
+        "false"
+    });
+    material.push('\n');
+    material.push_str("slot_id=");
+    material.push_str(
+        &request
+            .backend
+            .slot_id
+            .map(|value| value.to_string())
+            .unwrap_or_default(),
+    );
+    material.push('\n');
+    material.push_str("stop_sequences=");
+    material.push_str(&request.backend.stop_sequences.join("\u{1f}"));
+    material.push_str("\nprompt=\n");
+    material.push_str(&request.prompt);
+    fnv1a64_hex(&material)
+}
+
 fn parse_required_arg(args: &[String], flag: &str) -> Result<String, String> {
     parse_optional_arg(args, flag).ok_or_else(|| format!("missing required argument: {flag}"))
 }
@@ -1026,7 +1161,7 @@ fn session_id() -> String {
 
 fn print_usage() {
     println!("reviva scan [--repo PATH]");
-    println!("reviva review --repo PATH --mode MODE [--profile NAME] [--profile-file PATH] [--file PATH]... [--boundary-left PATH --boundary-right PATH] [--note TEXT] [--prompt-wrapper plain|qwen-chatml] [--kv-cache on|off] [--kv-slot SLOT_ID] [--llama-lifecycle manual|ensure-running|ensure-running-and-stop] [--preview-only] [--llama-model-path PATH_OR_DIR] [--llama-server-path PATH]");
+    println!("reviva review --repo PATH [--mode MODE] [--profile NAME] [--profile-file PATH] [--file PATH]... [--boundary-left PATH --boundary-right PATH] [--note TEXT] [--prompt-wrapper plain|qwen-chatml] [--kv-cache on|off] [--kv-slot SLOT_ID] [--llama-lifecycle manual|ensure-running|ensure-running-and-stop] [--preview-only] [--llama-model-path PATH_OR_DIR] [--llama-server-path PATH]");
     println!("reviva set save --repo PATH --name NAME --file PATH...");
     println!("reviva set load --repo PATH --name NAME");
     println!("reviva set list --repo PATH");
