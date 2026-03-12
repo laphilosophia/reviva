@@ -1,0 +1,28 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/reviva-core",
+  "crates/reviva-repo",
+  "crates/reviva-prompts",
+  "crates/reviva-backend",
+  "crates/reviva-storage",
+  "crates/reviva-export",
+  "crates/reviva-cli",
+  "crates/reviva-tui",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Erdem Arslan"]
+license = "see LICENSE"
+repository = ""
+
+# Shared dependency versions — pin here, reference with { workspace = true } in crates
+[workspace.dependencies]
+reviva-core = { path = "crates/reviva-core" }
+reviva-repo = { path = "crates/reviva-repo" }
+reviva-prompts = { path = "crates/reviva-prompts" }
+reviva-backend = { path = "crates/reviva-backend" }
+reviva-storage = { path = "crates/reviva-storage" }
+reviva-export = { path = "crates/reviva-export" }

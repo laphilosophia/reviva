@@ -1,0 +1,8 @@
+[package]
+name    = "reviva-core"
+version.workspace = true
+edition.workspace = true
+
+# No external dependencies — this crate must remain domain-pure.
+# See docs/module.md §reviva-core
+[dependencies]

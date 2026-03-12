@@ -1,0 +1,18 @@
+[package]
+name    = "reviva-cli"
+version.workspace = true
+edition.workspace = true
+
+# The v1 primary entrypoint. Depends on all domain crates.
+# See docs/module.md §reviva-cli
+[[bin]]
+name = "reviva"
+path = "src/main.rs"
+
+[dependencies]
+reviva-core    = { workspace = true }
+reviva-repo    = { workspace = true }
+reviva-prompts = { workspace = true }
+reviva-backend = { workspace = true }
+reviva-storage = { workspace = true }
+reviva-export  = { workspace = true }

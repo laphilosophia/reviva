@@ -1,0 +1,8 @@
+[package]
+name    = "reviva-backend"
+version.workspace = true
+edition.workspace = true
+
+# See docs/module.md §reviva-backend
+[dependencies]
+reviva-core = { workspace = true }
