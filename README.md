@@ -105,7 +105,7 @@ reviva export --repo /path/to/repo --session <SESSION_ID> --format json
 
 ```text
 reviva scan [--repo PATH]
-reviva review --repo PATH --mode MODE [--profile NAME] [--profile-file PATH] [--file PATH]... [--boundary-left PATH --boundary-right PATH] [--note TEXT] [--prompt-wrapper plain|qwen-chatml] [--preview-only] [--llama-model-path PATH_OR_DIR] [--llama-server-path PATH]
+reviva review --repo PATH --mode MODE [--profile NAME] [--profile-file PATH] [--file PATH]... [--boundary-left PATH --boundary-right PATH] [--note TEXT] [--prompt-wrapper plain|qwen-chatml] [--llama-lifecycle manual|ensure-running|ensure-running-and-stop] [--preview-only] [--llama-model-path PATH_OR_DIR] [--llama-server-path PATH]
 reviva set save --repo PATH --name NAME --file PATH...
 reviva set load --repo PATH --name NAME
 reviva set list --repo PATH
@@ -125,6 +125,7 @@ Example:
 backend_url = "http://127.0.0.1:8080"
 model = "local-model-name"
 prompt_wrapper = "plain"
+llama_lifecycle_policy = "ensure-running-and-stop"
 llama_model_path = "path/to/models/my-model/model.gguf" # Windows -> "path\\to\\models\\my-model\\model.gguf"
 llama_server_path = "llama-server"
 timeout_ms = 60000
@@ -139,6 +140,7 @@ Notes:
 
 - `prompt_wrapper` defaults to `plain` if omitted.
 - Use `qwen-chatml` only for backends/models that expect ChatML-style prompting.
+- `llama_lifecycle_policy` defaults to `ensure-running-and-stop` if omitted.
 - `max_file_bytes` and `estimated_prompt_tokens` are conservative defaults, not hard domain invariants.
 
 ## Target Selection Behavior
@@ -158,8 +160,10 @@ Boundary mode enforces deterministic ordering: `left -> right`.
 When backend is `http://127.0.0.1:8080` or `http://localhost:8080`, Reviva manages `llama-server` explicitly:
 
 - if server is active, Reviva reuses it
-- if server is inactive, Reviva starts it
-- if Reviva started it, Reviva stops it when command exits
+- if server is inactive, Reviva starts it when lifecycle policy is `ensure-running` or `ensure-running-and-stop`
+- if lifecycle policy is `ensure-running`, Reviva leaves the started server running
+- if lifecycle policy is `ensure-running-and-stop`, Reviva stops the started server when command exits
+- if lifecycle policy is `manual`, Reviva does not start/stop server processes
 - if `llama-server` binary is missing, Reviva returns explicit install guidance
 - if model path is missing in non-interactive mode, Reviva fails with a clear error
 

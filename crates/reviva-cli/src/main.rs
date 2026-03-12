@@ -84,6 +84,7 @@ fn cmd_review(args: &[String]) -> Result<(), String> {
     let note = parse_optional_arg(args, "--note");
     let model = parse_optional_arg(args, "--model");
     let prompt_wrapper_arg = parse_optional_arg(args, "--prompt-wrapper");
+    let llama_lifecycle_arg = parse_optional_arg(args, "--llama-lifecycle");
     let llama_model_path = parse_optional_arg(args, "--llama-model-path");
     let llama_server_path = parse_optional_arg(args, "--llama-server-path");
     let preview_only = has_flag(args, "--preview-only");
@@ -106,6 +107,11 @@ fn cmd_review(args: &[String]) -> Result<(), String> {
     if let Some(value) = prompt_wrapper_arg {
         let parsed = parse_prompt_wrapper(&value).map_err(|error| error.to_string())?;
         config.prompt_wrapper = Some(parsed.as_str().to_string());
+        config_updated = true;
+    }
+    if let Some(value) = llama_lifecycle_arg {
+        let parsed = parse_llama_lifecycle_policy(&value)?;
+        config.llama_lifecycle_policy = Some(parsed.as_str().to_string());
         config_updated = true;
     }
     if config_updated {
@@ -158,6 +164,7 @@ fn cmd_review(args: &[String]) -> Result<(), String> {
     )
     .map_err(|error| error.to_string())?;
     let prompt_wrapper = resolve_prompt_wrapper(config.prompt_wrapper.as_deref())?;
+    let llama_lifecycle = resolve_llama_lifecycle_policy(config.llama_lifecycle_policy.as_deref())?;
     let wrapped_prompt = apply_prompt_wrapper(&prompt_result.prompt, prompt_wrapper);
 
     println!("--- PROMPT PREVIEW START ---");
@@ -179,8 +186,9 @@ fn cmd_review(args: &[String]) -> Result<(), String> {
         backend: backend_settings.clone(),
         prompt: wrapped_prompt.clone(),
     };
-    let _llama_server_guard = ensure_llama_server(&storage, &mut config, &backend_settings)
-        .map_err(|error| format!("llama-server preflight failed: {error}"))?;
+    let _llama_server_guard =
+        ensure_llama_server(&storage, &mut config, &backend_settings, llama_lifecycle)
+            .map_err(|error| format!("llama-server preflight failed: {error}"))?;
     let backend = LlamaCompletionBackend::new();
     let response = backend
         .complete(&request)
@@ -208,6 +216,7 @@ fn cmd_review(args: &[String]) -> Result<(), String> {
         format!("profile={}", resolved_profile.spec.name),
         format!("profile_source={}", resolved_profile.source),
         format!("prompt_wrapper={}", prompt_wrapper.as_str()),
+        format!("llama_lifecycle={}", llama_lifecycle.as_str()),
         format!(
             "estimated_token_budget={}",
             estimated_target_tokens(&loaded, note.as_deref())
@@ -457,20 +466,30 @@ fn interactive_target_selection(repo: &Path, args: &[String]) -> Result<RevivaTa
 
 struct LlamaServerGuard {
     child: Option<Child>,
+    stop_on_drop: bool,
 }
 
 impl LlamaServerGuard {
     fn noop() -> Self {
-        Self { child: None }
+        Self {
+            child: None,
+            stop_on_drop: false,
+        }
     }
 
     fn started(child: Child) -> Self {
-        Self { child: Some(child) }
+        Self {
+            child: Some(child),
+            stop_on_drop: true,
+        }
     }
 }
 
 impl Drop for LlamaServerGuard {
     fn drop(&mut self) {
+        if !self.stop_on_drop {
+            return;
+        }
         if let Some(child) = &mut self.child {
             eprintln!("llama-server: stopping local process started by reviva");
             let _ = child.kill();
@@ -479,12 +498,58 @@ impl Drop for LlamaServerGuard {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LlamaLifecyclePolicy {
+    Manual,
+    EnsureRunning,
+    EnsureRunningAndStop,
+}
+
+impl LlamaLifecyclePolicy {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Manual => "manual",
+            Self::EnsureRunning => "ensure-running",
+            Self::EnsureRunningAndStop => "ensure-running-and-stop",
+        }
+    }
+}
+
+fn parse_llama_lifecycle_policy(raw: &str) -> Result<LlamaLifecyclePolicy, String> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "manual" => Ok(LlamaLifecyclePolicy::Manual),
+        "ensure-running" => Ok(LlamaLifecyclePolicy::EnsureRunning),
+        "ensure-running-and-stop" => Ok(LlamaLifecyclePolicy::EnsureRunningAndStop),
+        other => Err(format!(
+            "unsupported llama lifecycle policy: {other}. supported: manual, ensure-running, ensure-running-and-stop"
+        )),
+    }
+}
+
+fn resolve_llama_lifecycle_policy(raw: Option<&str>) -> Result<LlamaLifecyclePolicy, String> {
+    match raw {
+        Some(value) => parse_llama_lifecycle_policy(value),
+        None => Ok(LlamaLifecyclePolicy::EnsureRunningAndStop),
+    }
+}
+
 fn ensure_llama_server(
     storage: &Storage,
     config: &mut AppConfig,
     backend: &BackendSettings,
+    policy: LlamaLifecyclePolicy,
 ) -> Result<LlamaServerGuard, String> {
+    if policy == LlamaLifecyclePolicy::Manual {
+        eprintln!("llama-server: lifecycle policy manual, skipping server management");
+        return Ok(LlamaServerGuard::noop());
+    }
+
     if !should_manage_llama_server(&backend.base_url) {
+        eprintln!(
+            "llama-server: lifecycle policy {} ignored for non-local backend {}",
+            policy.as_str(),
+            backend.base_url
+        );
         return Ok(LlamaServerGuard::noop());
     }
 
@@ -502,15 +567,24 @@ fn ensure_llama_server(
 
     let model_path = resolve_llama_model_path(storage, config)?;
     let (host, port) = parse_http_host_port(&backend.base_url)?;
-    let child = start_llama_server(
+    let mut child = start_llama_server(
         &server_bin,
         &model_path,
         &host,
         port,
         backend.model.as_deref(),
     )?;
-    wait_for_llama_server_ready(&backend.base_url, Duration::from_secs(90))?;
+    wait_for_llama_server_ready(
+        &backend.base_url,
+        &mut child,
+        Duration::from_secs(90),
+        &model_path,
+    )?;
     eprintln!("llama-server: started on {}:{}", host, port);
+    if policy == LlamaLifecyclePolicy::EnsureRunning {
+        eprintln!("llama-server: leaving process running after review");
+        return Ok(LlamaServerGuard::noop());
+    }
     Ok(LlamaServerGuard::started(child))
 }
 
@@ -650,17 +724,35 @@ fn start_llama_server(
         .map_err(|error| format!("llama-server başlatılamadı: {error}"))
 }
 
-fn wait_for_llama_server_ready(base_url: &str, timeout: Duration) -> Result<(), String> {
+fn wait_for_llama_server_ready(
+    base_url: &str,
+    child: &mut Child,
+    timeout: Duration,
+    model_path: &str,
+) -> Result<(), String> {
     let start = SystemTime::now();
     loop {
         if llama_server_health(base_url) {
             return Ok(());
         }
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                return Err(format!(
+                    "llama-server exited before ready (status: {status}). Check model path and startup flags. model_path={model_path}"
+                ));
+            }
+            Ok(None) => {}
+            Err(error) => {
+                return Err(format!(
+                    "llama-server process status check failed: {error}. model_path={model_path}"
+                ));
+            }
+        }
         let elapsed = SystemTime::now().duration_since(start).unwrap_or_default();
         if elapsed >= timeout {
             return Err(format!(
-                "llama-server beklenen sürede hazır olmadı ({:?})",
-                timeout
+                "llama-server not ready after {:?}. Check model path, port collisions, and permissions. backend_url={} model_path={}",
+                timeout, base_url, model_path
             ));
         }
         thread::sleep(Duration::from_millis(500));
@@ -831,7 +923,7 @@ fn session_id() -> String {
 
 fn print_usage() {
     println!("reviva scan [--repo PATH]");
-    println!("reviva review --repo PATH --mode MODE [--profile NAME] [--profile-file PATH] [--file PATH]... [--boundary-left PATH --boundary-right PATH] [--note TEXT] [--prompt-wrapper plain|qwen-chatml] [--preview-only] [--llama-model-path PATH_OR_DIR] [--llama-server-path PATH]");
+    println!("reviva review --repo PATH --mode MODE [--profile NAME] [--profile-file PATH] [--file PATH]... [--boundary-left PATH --boundary-right PATH] [--note TEXT] [--prompt-wrapper plain|qwen-chatml] [--llama-lifecycle manual|ensure-running|ensure-running-and-stop] [--preview-only] [--llama-model-path PATH_OR_DIR] [--llama-server-path PATH]");
     println!("reviva set save --repo PATH --name NAME --file PATH...");
     println!("reviva set load --repo PATH --name NAME");
     println!("reviva set list --repo PATH");
