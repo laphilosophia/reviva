@@ -182,10 +182,11 @@ fn parse_legacy_completion_response(
         });
     }
 
-    let json: Value = serde_json::from_str(&raw_http_body).map_err(|_| BackendError::MalformedResponse {
-        status_code,
-        raw_http_body: raw_http_body.clone(),
-    })?;
+    let json: Value =
+        serde_json::from_str(&raw_http_body).map_err(|_| BackendError::MalformedResponse {
+            status_code,
+            raw_http_body: raw_http_body.clone(),
+        })?;
     let Some(content) = json.get("content").and_then(Value::as_str) else {
         return Err(BackendError::MalformedResponse {
             status_code,
@@ -231,10 +232,11 @@ fn parse_openai_completion_response(
         });
     }
 
-    let json: Value = serde_json::from_str(&raw_http_body).map_err(|_| BackendError::MalformedResponse {
-        status_code,
-        raw_http_body: raw_http_body.clone(),
-    })?;
+    let json: Value =
+        serde_json::from_str(&raw_http_body).map_err(|_| BackendError::MalformedResponse {
+            status_code,
+            raw_http_body: raw_http_body.clone(),
+        })?;
     let Some(content) = json
         .get("choices")
         .and_then(Value::as_array)

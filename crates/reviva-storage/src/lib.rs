@@ -11,6 +11,8 @@ use std::path::{Path, PathBuf};
 pub struct AppConfig {
     pub backend_url: String,
     pub model: Option<String>,
+    pub llama_server_path: Option<String>,
+    pub llama_model_path: Option<String>,
     pub timeout_ms: u64,
     pub max_tokens: u32,
     pub temperature: f32,
@@ -24,6 +26,8 @@ impl Default for AppConfig {
         Self {
             backend_url: "http://127.0.0.1:8080".to_string(),
             model: None,
+            llama_server_path: None,
+            llama_model_path: None,
             timeout_ms: 60_000,
             max_tokens: 2048,
             temperature: 0.1,
@@ -235,6 +239,8 @@ impl Storage {
 struct AppConfigDto {
     backend_url: String,
     model: Option<String>,
+    llama_server_path: Option<String>,
+    llama_model_path: Option<String>,
     timeout_ms: u64,
     max_tokens: u32,
     temperature: f32,
@@ -248,6 +254,8 @@ impl From<AppConfig> for AppConfigDto {
         Self {
             backend_url: value.backend_url,
             model: value.model,
+            llama_server_path: value.llama_server_path,
+            llama_model_path: value.llama_model_path,
             timeout_ms: value.timeout_ms,
             max_tokens: value.max_tokens,
             temperature: value.temperature,
@@ -263,6 +271,8 @@ impl From<AppConfigDto> for AppConfig {
         Self {
             backend_url: value.backend_url,
             model: value.model,
+            llama_server_path: value.llama_server_path,
+            llama_model_path: value.llama_model_path,
             timeout_ms: value.timeout_ms,
             max_tokens: value.max_tokens,
             temperature: value.temperature,

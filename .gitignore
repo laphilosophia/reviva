@@ -29,6 +29,10 @@ coverage/
 .cache/
 .turbo/
 
+# LLM Models
+models/
+lm-models/
+
 # Internals
 /docs/
 AGENTS.md

@@ -10,8 +10,11 @@ use reviva_storage::{AppConfig, Storage};
 use std::env;
 use std::fs;
 use std::io::{self, IsTerminal, Write};
+use std::net::ToSocketAddrs;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::process::{Child, Command, Stdio};
+use std::thread;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 fn main() {
     if let Err(error) = run() {
@@ -74,6 +77,8 @@ fn cmd_review(args: &[String]) -> Result<(), String> {
     let mode = parse_mode_arg(args)?;
     let note = parse_optional_arg(args, "--note");
     let model = parse_optional_arg(args, "--model");
+    let llama_model_path = parse_optional_arg(args, "--llama-model-path");
+    let llama_server_path = parse_optional_arg(args, "--llama-server-path");
     let preview_only = has_flag(args, "--preview-only");
     let files = parse_repeat_arg(args, "--file");
     let boundary_left = parse_optional_arg(args, "--boundary-left");
@@ -81,7 +86,21 @@ fn cmd_review(args: &[String]) -> Result<(), String> {
 
     let storage = Storage::new(&repo);
     storage.init().map_err(|error| error.to_string())?;
-    let config = storage.load_config().map_err(|error| error.to_string())?;
+    let mut config = storage.load_config().map_err(|error| error.to_string())?;
+    let mut config_updated = false;
+    if let Some(path) = llama_model_path {
+        config.llama_model_path = Some(path);
+        config_updated = true;
+    }
+    if let Some(path) = llama_server_path {
+        config.llama_server_path = Some(path);
+        config_updated = true;
+    }
+    if config_updated {
+        storage
+            .save_config(&config)
+            .map_err(|error| error.to_string())?;
+    }
     let target = resolve_target(&repo, args, files, boundary_left, boundary_right)?;
     let repo_config = RepoScanConfig {
         max_file_bytes: config.max_file_bytes,
@@ -127,17 +146,19 @@ fn cmd_review(args: &[String]) -> Result<(), String> {
     }
 
     let backend_settings = BackendSettings {
-        base_url: config.backend_url,
-        model: model.or(config.model),
+        base_url: config.backend_url.clone(),
+        model: model.or_else(|| config.model.clone()),
         temperature: config.temperature,
         max_tokens: config.max_tokens,
         timeout_ms: config.timeout_ms,
-        stop_sequences: config.stop_sequences,
+        stop_sequences: config.stop_sequences.clone(),
     };
     let request = RevivaRequest {
         backend: backend_settings.clone(),
         prompt: prompt_result.prompt.clone(),
     };
+    let _llama_server_guard = ensure_llama_server(&storage, &mut config, &backend_settings)
+        .map_err(|error| format!("llama-server preflight failed: {error}"))?;
     let backend = LlamaCompletionBackend::new();
     let response = backend
         .complete(&request)
@@ -382,6 +403,233 @@ fn interactive_target_selection(repo: &Path, args: &[String]) -> Result<RevivaTa
     }
 }
 
+struct LlamaServerGuard {
+    child: Option<Child>,
+}
+
+impl LlamaServerGuard {
+    fn noop() -> Self {
+        Self { child: None }
+    }
+
+    fn started(child: Child) -> Self {
+        Self { child: Some(child) }
+    }
+}
+
+impl Drop for LlamaServerGuard {
+    fn drop(&mut self) {
+        if let Some(child) = &mut self.child {
+            eprintln!("llama-server: stopping local process started by reviva");
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+fn ensure_llama_server(
+    storage: &Storage,
+    config: &mut AppConfig,
+    backend: &BackendSettings,
+) -> Result<LlamaServerGuard, String> {
+    if !should_manage_llama_server(&backend.base_url) {
+        return Ok(LlamaServerGuard::noop());
+    }
+
+    if llama_server_health(&backend.base_url) {
+        eprintln!("llama-server: active");
+        return Ok(LlamaServerGuard::noop());
+    }
+
+    let server_bin = config
+        .llama_server_path
+        .as_deref()
+        .unwrap_or("llama-server")
+        .to_string();
+    assert_llama_server_installed(&server_bin)?;
+
+    let model_path = resolve_llama_model_path(storage, config)?;
+    let (host, port) = parse_http_host_port(&backend.base_url)?;
+    let child = start_llama_server(
+        &server_bin,
+        &model_path,
+        &host,
+        port,
+        backend.model.as_deref(),
+    )?;
+    wait_for_llama_server_ready(&backend.base_url, Duration::from_secs(90))?;
+    eprintln!("llama-server: started on {}:{}", host, port);
+    Ok(LlamaServerGuard::started(child))
+}
+
+fn should_manage_llama_server(base_url: &str) -> bool {
+    let normalized = base_url.trim().trim_end_matches('/').to_ascii_lowercase();
+    normalized == "http://127.0.0.1:8080" || normalized == "http://localhost:8080"
+}
+
+fn assert_llama_server_installed(server_bin: &str) -> Result<(), String> {
+    let result = Command::new(server_bin)
+        .arg("--version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    match result {
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Err(
+            "llama-server bulunamadı. Kurulum yap ve PATH'e ekle (örn. `winget install ggml.llamacpp`)."
+                .to_string(),
+        ),
+        Err(error) => Err(format!("llama-server kontrolü başarısız: {error}")),
+    }
+}
+
+fn resolve_llama_model_path(storage: &Storage, config: &mut AppConfig) -> Result<String, String> {
+    if let Some(path) = config.llama_model_path.clone() {
+        return normalize_llama_model_path(&path);
+    }
+
+    if !io::stdin().is_terminal() {
+        return Err(
+            "llama-server otomatik başlatma için model yolu gerekli. `--llama-model-path <GGUF|dizin>` ver veya `.reviva/config.toml` içine `llama_model_path` ekle."
+                .to_string(),
+        );
+    }
+
+    print!("llama-server modeli için GGUF dosya/dizin yolu gir: ");
+    io::stdout().flush().map_err(|error| error.to_string())?;
+    let mut input = String::new();
+    io::stdin()
+        .read_line(&mut input)
+        .map_err(|error| error.to_string())?;
+    let model_path = normalize_llama_model_path(input.trim())?;
+    config.llama_model_path = Some(model_path.clone());
+    storage
+        .save_config(config)
+        .map_err(|error| format!("model yolu config'e yazılamadı: {error}"))?;
+    Ok(model_path)
+}
+
+fn normalize_llama_model_path(raw_path: &str) -> Result<String, String> {
+    if raw_path.trim().is_empty() {
+        return Err("boş model yolu verildi".to_string());
+    }
+    let path = PathBuf::from(raw_path);
+    if !path.exists() {
+        return Err(format!("model yolu bulunamadı: {raw_path}"));
+    }
+    if path.is_file() {
+        if is_gguf_file(&path) {
+            let canonical = path
+                .canonicalize()
+                .map_err(|error| format!("model yolu çözümlenemedi: {error}"))?;
+            return Ok(canonical.to_string_lossy().to_string());
+        }
+        return Err("model dosyası .gguf olmalı".to_string());
+    }
+
+    let mut candidates = fs::read_dir(&path)
+        .map_err(|error| format!("model dizini okunamadı: {error}"))?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|candidate| candidate.is_file() && is_gguf_file(candidate))
+        .collect::<Vec<_>>();
+    candidates.sort();
+    let Some(first) = candidates.first() else {
+        return Err("model dizininde .gguf dosyası bulunamadı".to_string());
+    };
+    let canonical = first
+        .canonicalize()
+        .map_err(|error| format!("model yolu çözümlenemedi: {error}"))?;
+    Ok(canonical.to_string_lossy().to_string())
+}
+
+fn is_gguf_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|value| value.to_str())
+        .map(|value| value.eq_ignore_ascii_case("gguf"))
+        .unwrap_or(false)
+}
+
+fn parse_http_host_port(base_url: &str) -> Result<(String, u16), String> {
+    let trimmed = base_url.trim().trim_end_matches('/');
+    let without_scheme = if let Some(value) = trimmed.strip_prefix("http://") {
+        value
+    } else {
+        return Err(format!(
+            "llama-server yönetimi sadece http backend için destekleniyor: {base_url}"
+        ));
+    };
+    let authority = without_scheme
+        .split('/')
+        .next()
+        .ok_or_else(|| format!("backend URL authority parse edilemedi: {base_url}"))?;
+    let (host, port) = authority
+        .rsplit_once(':')
+        .ok_or_else(|| format!("backend URL port içermeli: {base_url}"))?;
+    let port = port
+        .parse::<u16>()
+        .map_err(|error| format!("backend URL port parse edilemedi: {error}"))?;
+    Ok((host.to_string(), port))
+}
+
+fn start_llama_server(
+    server_bin: &str,
+    model_path: &str,
+    host: &str,
+    port: u16,
+    model_alias: Option<&str>,
+) -> Result<Child, String> {
+    eprintln!("llama-server: inactive, starting with model {}", model_path);
+    let mut command = Command::new(server_bin);
+    command
+        .arg("-m")
+        .arg(model_path)
+        .arg("--host")
+        .arg(host)
+        .arg("--port")
+        .arg(port.to_string())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    if let Some(alias) = model_alias {
+        command.arg("--alias").arg(alias);
+    }
+    command
+        .spawn()
+        .map_err(|error| format!("llama-server başlatılamadı: {error}"))
+}
+
+fn wait_for_llama_server_ready(base_url: &str, timeout: Duration) -> Result<(), String> {
+    let start = SystemTime::now();
+    loop {
+        if llama_server_health(base_url) {
+            return Ok(());
+        }
+        let elapsed = SystemTime::now().duration_since(start).unwrap_or_default();
+        if elapsed >= timeout {
+            return Err(format!(
+                "llama-server beklenen sürede hazır olmadı ({:?})",
+                timeout
+            ));
+        }
+        thread::sleep(Duration::from_millis(500));
+    }
+}
+
+fn llama_server_health(base_url: &str) -> bool {
+    let (host, port) = match parse_http_host_port(base_url) {
+        Ok(value) => value,
+        Err(_) => return false,
+    };
+    let timeout = Duration::from_millis(800);
+    let Ok(mut addrs) = format!("{host}:{port}").to_socket_addrs() else {
+        return false;
+    };
+    let Some(addr) = addrs.next() else {
+        return false;
+    };
+    std::net::TcpStream::connect_timeout(&addr, timeout).is_ok()
+}
+
 fn parse_repo_arg(args: &[String]) -> Result<PathBuf, String> {
     let repo = parse_optional_arg(args, "--repo").unwrap_or_else(|| ".".to_string());
     PathBuf::from(repo)
@@ -446,7 +694,7 @@ fn session_id() -> String {
 
 fn print_usage() {
     println!("reviva scan [--repo PATH]");
-    println!("reviva review --repo PATH --mode MODE [--file PATH]... [--boundary-left PATH --boundary-right PATH] [--note TEXT] [--preview-only]");
+    println!("reviva review --repo PATH --mode MODE [--file PATH]... [--boundary-left PATH --boundary-right PATH] [--note TEXT] [--preview-only] [--llama-model-path PATH_OR_DIR] [--llama-server-path PATH]");
     println!("reviva set save --repo PATH --name NAME --file PATH...");
     println!("reviva set load --repo PATH --name NAME");
     println!("reviva set list --repo PATH");
