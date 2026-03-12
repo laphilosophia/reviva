@@ -13,6 +13,8 @@ pub struct AppConfig {
     pub model: Option<String>,
     pub prompt_wrapper: Option<String>,
     pub llama_lifecycle_policy: Option<String>,
+    pub llama_kv_cache: Option<bool>,
+    pub llama_slot_id: Option<u32>,
     pub review_profile: Option<String>,
     pub review_profile_file: Option<String>,
     pub llama_server_path: Option<String>,
@@ -32,6 +34,8 @@ impl Default for AppConfig {
             model: None,
             prompt_wrapper: None,
             llama_lifecycle_policy: None,
+            llama_kv_cache: None,
+            llama_slot_id: None,
             review_profile: None,
             review_profile_file: None,
             llama_server_path: None,
@@ -249,6 +253,8 @@ struct AppConfigDto {
     model: Option<String>,
     prompt_wrapper: Option<String>,
     llama_lifecycle_policy: Option<String>,
+    llama_kv_cache: Option<bool>,
+    llama_slot_id: Option<u32>,
     review_profile: Option<String>,
     review_profile_file: Option<String>,
     llama_server_path: Option<String>,
@@ -268,6 +274,8 @@ impl From<AppConfig> for AppConfigDto {
             model: value.model,
             prompt_wrapper: value.prompt_wrapper,
             llama_lifecycle_policy: value.llama_lifecycle_policy,
+            llama_kv_cache: value.llama_kv_cache,
+            llama_slot_id: value.llama_slot_id,
             review_profile: value.review_profile,
             review_profile_file: value.review_profile_file,
             llama_server_path: value.llama_server_path,
@@ -289,6 +297,8 @@ impl From<AppConfigDto> for AppConfig {
             model: value.model,
             prompt_wrapper: value.prompt_wrapper,
             llama_lifecycle_policy: value.llama_lifecycle_policy,
+            llama_kv_cache: value.llama_kv_cache,
+            llama_slot_id: value.llama_slot_id,
             review_profile: value.review_profile,
             review_profile_file: value.review_profile_file,
             llama_server_path: value.llama_server_path,
@@ -458,6 +468,8 @@ struct BackendSettingsDto {
     max_tokens: u32,
     timeout_ms: u64,
     stop_sequences: Vec<String>,
+    cache_prompt: Option<bool>,
+    slot_id: Option<u32>,
 }
 
 impl From<BackendSettings> for BackendSettingsDto {
@@ -469,6 +481,8 @@ impl From<BackendSettings> for BackendSettingsDto {
             max_tokens: value.max_tokens,
             timeout_ms: value.timeout_ms,
             stop_sequences: value.stop_sequences,
+            cache_prompt: Some(value.cache_prompt),
+            slot_id: value.slot_id,
         }
     }
 }
@@ -482,6 +496,8 @@ impl From<BackendSettingsDto> for BackendSettings {
             max_tokens: value.max_tokens,
             timeout_ms: value.timeout_ms,
             stop_sequences: value.stop_sequences,
+            cache_prompt: value.cache_prompt.unwrap_or(false),
+            slot_id: value.slot_id,
         }
     }
 }

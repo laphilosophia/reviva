@@ -207,6 +207,8 @@ pub struct BackendSettings {
     pub max_tokens: u32,
     pub timeout_ms: u64,
     pub stop_sequences: Vec<String>,
+    pub cache_prompt: bool,
+    pub slot_id: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

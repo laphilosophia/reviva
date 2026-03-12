@@ -21,6 +21,8 @@ fn fixture_session() -> Session {
             max_tokens: 256,
             timeout_ms: 1000,
             stop_sequences: vec![],
+            cache_prompt: false,
+            slot_id: None,
         },
         response: RevivaResponse {
             status_code: Some(200),
@@ -76,6 +78,8 @@ fn roundtrip_session_config_and_set() {
         config.review_profile_file,
         loaded_config.review_profile_file
     );
+    assert_eq!(config.llama_kv_cache, loaded_config.llama_kv_cache);
+    assert_eq!(config.llama_slot_id, loaded_config.llama_slot_id);
 
     let session = fixture_session();
     storage.save_session(&session).expect("save session");
@@ -83,6 +87,8 @@ fn roundtrip_session_config_and_set() {
     assert_eq!(loaded_session.id, session.id);
     assert_eq!(loaded_session.prompt_sent, session.prompt_sent);
     assert_eq!(loaded_session.findings.len(), 1);
+    assert!(!loaded_session.backend.cache_prompt);
+    assert_eq!(loaded_session.backend.slot_id, None);
 
     let set = reviva_core::NamedSet {
         name: "critical".to_string(),

@@ -139,7 +139,11 @@ fn legacy_payload(request: &RevivaRequest) -> Value {
         "temperature": request.backend.temperature,
         "n_predict": request.backend.max_tokens,
         "stop": request.backend.stop_sequences,
+        "cache_prompt": request.backend.cache_prompt,
     });
+    if let Some(slot_id) = request.backend.slot_id {
+        payload["id_slot"] = Value::Number(slot_id.into());
+    }
     if let Some(model) = &request.backend.model {
         payload["model"] = Value::String(model.clone());
     }

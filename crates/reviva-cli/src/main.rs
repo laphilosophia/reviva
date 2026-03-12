@@ -13,7 +13,7 @@ use reviva_repo::{estimated_target_tokens, load_target_files, scan_repository, R
 use reviva_storage::{AppConfig, Storage};
 use std::env;
 use std::fs;
-use std::io::{self, IsTerminal, Write};
+use std::io::{self, IsTerminal, Read, Write};
 use std::net::ToSocketAddrs;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -84,6 +84,8 @@ fn cmd_review(args: &[String]) -> Result<(), String> {
     let note = parse_optional_arg(args, "--note");
     let model = parse_optional_arg(args, "--model");
     let prompt_wrapper_arg = parse_optional_arg(args, "--prompt-wrapper");
+    let kv_cache_arg = parse_optional_arg(args, "--kv-cache");
+    let kv_slot_arg = parse_optional_arg(args, "--kv-slot");
     let llama_lifecycle_arg = parse_optional_arg(args, "--llama-lifecycle");
     let llama_model_path = parse_optional_arg(args, "--llama-model-path");
     let llama_server_path = parse_optional_arg(args, "--llama-server-path");
@@ -107,6 +109,13 @@ fn cmd_review(args: &[String]) -> Result<(), String> {
     if let Some(value) = prompt_wrapper_arg {
         let parsed = parse_prompt_wrapper(&value).map_err(|error| error.to_string())?;
         config.prompt_wrapper = Some(parsed.as_str().to_string());
+    }
+    if let Some(value) = kv_cache_arg {
+        config.llama_kv_cache = Some(parse_kv_cache_flag(&value)?);
+        config_updated = true;
+    }
+    if let Some(value) = kv_slot_arg {
+        config.llama_slot_id = Some(parse_kv_slot_id(&value)?);
         config_updated = true;
     }
     if let Some(value) = llama_lifecycle_arg {
@@ -165,6 +174,8 @@ fn cmd_review(args: &[String]) -> Result<(), String> {
     .map_err(|error| error.to_string())?;
     let prompt_wrapper = resolve_prompt_wrapper(config.prompt_wrapper.as_deref())?;
     let llama_lifecycle = resolve_llama_lifecycle_policy(config.llama_lifecycle_policy.as_deref())?;
+    let kv_cache_enabled = config.llama_kv_cache.unwrap_or(false);
+    let kv_slot_id = config.llama_slot_id;
     let wrapped_prompt = apply_prompt_wrapper(&prompt_result.prompt, prompt_wrapper);
 
     println!("--- PROMPT PREVIEW START ---");
@@ -181,14 +192,17 @@ fn cmd_review(args: &[String]) -> Result<(), String> {
         max_tokens: config.max_tokens,
         timeout_ms: config.timeout_ms,
         stop_sequences: config.stop_sequences.clone(),
+        cache_prompt: kv_cache_enabled,
+        slot_id: kv_slot_id,
     };
     let request = RevivaRequest {
         backend: backend_settings.clone(),
         prompt: wrapped_prompt.clone(),
     };
-    let _llama_server_guard =
+    let llama_server_outcome =
         ensure_llama_server(&storage, &mut config, &backend_settings, llama_lifecycle)
             .map_err(|error| format!("llama-server preflight failed: {error}"))?;
+    let _llama_server_guard = llama_server_outcome.guard;
     let backend = LlamaCompletionBackend::new();
     let response = backend
         .complete(&request)
@@ -217,6 +231,17 @@ fn cmd_review(args: &[String]) -> Result<(), String> {
         format!("profile_source={}", resolved_profile.source),
         format!("prompt_wrapper={}", prompt_wrapper.as_str()),
         format!("llama_lifecycle={}", llama_lifecycle.as_str()),
+        format!(
+            "llama_server_action={}",
+            llama_server_outcome.action.as_str()
+        ),
+        format!("kv_cache={}", if kv_cache_enabled { "on" } else { "off" }),
+        format!(
+            "kv_slot={}",
+            kv_slot_id
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "auto".to_string())
+        ),
         format!(
             "estimated_token_budget={}",
             estimated_target_tokens(&loaded, note.as_deref())
@@ -499,6 +524,27 @@ impl Drop for LlamaServerGuard {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LlamaServerAction {
+    PolicyManual,
+    NonLocalBackendIgnored,
+    ReusedActiveServer,
+    StartedKeepRunning,
+    StartedAndStopOnExit,
+}
+
+impl LlamaServerAction {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::PolicyManual => "policy_manual",
+            Self::NonLocalBackendIgnored => "non_local_backend_ignored",
+            Self::ReusedActiveServer => "reused_active_server",
+            Self::StartedKeepRunning => "started_keep_running",
+            Self::StartedAndStopOnExit => "started_and_stop_on_exit",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LlamaLifecyclePolicy {
     Manual,
     EnsureRunning,
@@ -533,15 +579,23 @@ fn resolve_llama_lifecycle_policy(raw: Option<&str>) -> Result<LlamaLifecyclePol
     }
 }
 
+struct LlamaServerOutcome {
+    guard: LlamaServerGuard,
+    action: LlamaServerAction,
+}
+
 fn ensure_llama_server(
     storage: &Storage,
     config: &mut AppConfig,
     backend: &BackendSettings,
     policy: LlamaLifecyclePolicy,
-) -> Result<LlamaServerGuard, String> {
+) -> Result<LlamaServerOutcome, String> {
     if policy == LlamaLifecyclePolicy::Manual {
         eprintln!("llama-server: lifecycle policy manual, skipping server management");
-        return Ok(LlamaServerGuard::noop());
+        return Ok(LlamaServerOutcome {
+            guard: LlamaServerGuard::noop(),
+            action: LlamaServerAction::PolicyManual,
+        });
     }
 
     if !should_manage_llama_server(&backend.base_url) {
@@ -550,12 +604,18 @@ fn ensure_llama_server(
             policy.as_str(),
             backend.base_url
         );
-        return Ok(LlamaServerGuard::noop());
+        return Ok(LlamaServerOutcome {
+            guard: LlamaServerGuard::noop(),
+            action: LlamaServerAction::NonLocalBackendIgnored,
+        });
     }
 
     if llama_server_health(&backend.base_url) {
         eprintln!("llama-server: active");
-        return Ok(LlamaServerGuard::noop());
+        return Ok(LlamaServerOutcome {
+            guard: LlamaServerGuard::noop(),
+            action: LlamaServerAction::ReusedActiveServer,
+        });
     }
 
     let server_bin = config
@@ -583,9 +643,15 @@ fn ensure_llama_server(
     eprintln!("llama-server: started on {}:{}", host, port);
     if policy == LlamaLifecyclePolicy::EnsureRunning {
         eprintln!("llama-server: leaving process running after review");
-        return Ok(LlamaServerGuard::noop());
+        return Ok(LlamaServerOutcome {
+            guard: LlamaServerGuard::noop(),
+            action: LlamaServerAction::StartedKeepRunning,
+        });
     }
-    Ok(LlamaServerGuard::started(child))
+    Ok(LlamaServerOutcome {
+        guard: LlamaServerGuard::started(child),
+        action: LlamaServerAction::StartedAndStopOnExit,
+    })
 }
 
 fn should_manage_llama_server(base_url: &str) -> bool {
@@ -765,13 +831,36 @@ fn llama_server_health(base_url: &str) -> bool {
         Err(_) => return false,
     };
     let timeout = Duration::from_millis(800);
+    if let Some(status_code) = http_status_probe(&host, port, "/health", timeout) {
+        return (200..300).contains(&status_code);
+    }
+    false
+}
+
+fn http_status_probe(host: &str, port: u16, path: &str, timeout: Duration) -> Option<u16> {
     let Ok(mut addrs) = format!("{host}:{port}").to_socket_addrs() else {
-        return false;
+        return None;
     };
     let Some(addr) = addrs.next() else {
-        return false;
+        return None;
     };
-    std::net::TcpStream::connect_timeout(&addr, timeout).is_ok()
+    let Ok(mut stream) = std::net::TcpStream::connect_timeout(&addr, timeout) else {
+        return None;
+    };
+    let _ = stream.set_read_timeout(Some(timeout));
+    let _ = stream.set_write_timeout(Some(timeout));
+    let request =
+        format!("GET {path} HTTP/1.1\r\nHost: {host}:{port}\r\nConnection: close\r\n\r\n");
+    stream.write_all(request.as_bytes()).ok()?;
+    let mut buf = [0_u8; 256];
+    let bytes_read = stream.read(&mut buf).ok()?;
+    if bytes_read == 0 {
+        return None;
+    }
+    let head = String::from_utf8_lossy(&buf[..bytes_read]);
+    let first_line = head.lines().next()?;
+    let status_token = first_line.split_whitespace().nth(1)?;
+    status_token.parse::<u16>().ok()
 }
 
 fn parse_repo_arg(args: &[String]) -> Result<PathBuf, String> {
@@ -792,6 +881,22 @@ fn resolve_prompt_wrapper(value: Option<&str>) -> Result<PromptWrapper, String> 
         Some(raw) => parse_prompt_wrapper(raw).map_err(|error| error.to_string()),
         None => Ok(PromptWrapper::Plain),
     }
+}
+
+fn parse_kv_cache_flag(raw: &str) -> Result<bool, String> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "on" | "true" | "1" => Ok(true),
+        "off" | "false" | "0" => Ok(false),
+        other => Err(format!(
+            "unsupported kv cache flag: {other}. supported: on|off"
+        )),
+    }
+}
+
+fn parse_kv_slot_id(raw: &str) -> Result<u32, String> {
+    raw.trim()
+        .parse::<u32>()
+        .map_err(|error| format!("invalid --kv-slot value '{raw}': {error}"))
 }
 
 struct ResolvedProfile {
@@ -923,7 +1028,7 @@ fn session_id() -> String {
 
 fn print_usage() {
     println!("reviva scan [--repo PATH]");
-    println!("reviva review --repo PATH --mode MODE [--profile NAME] [--profile-file PATH] [--file PATH]... [--boundary-left PATH --boundary-right PATH] [--note TEXT] [--prompt-wrapper plain|qwen-chatml] [--llama-lifecycle manual|ensure-running|ensure-running-and-stop] [--preview-only] [--llama-model-path PATH_OR_DIR] [--llama-server-path PATH]");
+    println!("reviva review --repo PATH --mode MODE [--profile NAME] [--profile-file PATH] [--file PATH]... [--boundary-left PATH --boundary-right PATH] [--note TEXT] [--prompt-wrapper plain|qwen-chatml] [--kv-cache on|off] [--kv-slot SLOT_ID] [--llama-lifecycle manual|ensure-running|ensure-running-and-stop] [--preview-only] [--llama-model-path PATH_OR_DIR] [--llama-server-path PATH]");
     println!("reviva set save --repo PATH --name NAME --file PATH...");
     println!("reviva set load --repo PATH --name NAME");
     println!("reviva set list --repo PATH");

@@ -12,6 +12,28 @@ fn request(base_url: String, timeout_ms: u64) -> RevivaRequest {
             max_tokens: 256,
             timeout_ms,
             stop_sequences: Vec::new(),
+            cache_prompt: false,
+            slot_id: None,
+        },
+        prompt: "review this".to_string(),
+    }
+}
+
+fn request_with_kv_cache_enabled(
+    base_url: String,
+    timeout_ms: u64,
+    slot_id: Option<u32>,
+) -> RevivaRequest {
+    RevivaRequest {
+        backend: BackendSettings {
+            base_url,
+            model: Some("test-model".to_string()),
+            temperature: 0.1,
+            max_tokens: 256,
+            timeout_ms,
+            stop_sequences: Vec::new(),
+            cache_prompt: true,
+            slot_id,
         },
         prompt: "review this".to_string(),
     }
@@ -174,5 +196,68 @@ fn timeout_maps_to_timeout_error() {
     match error {
         BackendError::Timeout | BackendError::Transport(_) => {}
         _ => panic!("unexpected error: {error:?}"),
+    }
+}
+
+#[test]
+fn legacy_payload_includes_kv_cache_fields() {
+    let server = MockServer::start();
+    let mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/completion")
+            .body_contains("\"cache_prompt\":true")
+            .body_contains("\"id_slot\":3");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"content":"SUMMARY:\n- ok"}"#);
+    });
+
+    let backend = LlamaCompletionBackend::new();
+    let response = backend
+        .complete(&request_with_kv_cache_enabled(
+            server.url(""),
+            10_000,
+            Some(3),
+        ))
+        .expect("request should succeed");
+    mock.assert();
+    match response.response_interpretation {
+        ResponseInterpretation::Completed { content } => {
+            assert!(content.contains("SUMMARY"));
+        }
+        _ => panic!("expected completed interpretation"),
+    }
+}
+
+#[test]
+fn legacy_payload_omits_id_slot_when_not_set() {
+    let server = MockServer::start();
+    let slot_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/completion")
+            .body_contains("\"id_slot\":");
+        then.status(500).body("unexpected id_slot");
+    });
+    let cache_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/completion")
+            .body_contains("\"cache_prompt\":true");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"content":"SUMMARY:\n- ok"}"#);
+    });
+
+    let backend = LlamaCompletionBackend::new();
+    let response = backend
+        .complete(&request_with_kv_cache_enabled(server.url(""), 10_000, None))
+        .expect("request should succeed");
+
+    assert_eq!(slot_mock.hits(), 0);
+    cache_mock.assert();
+    match response.response_interpretation {
+        ResponseInterpretation::Completed { content } => {
+            assert!(content.contains("SUMMARY"));
+        }
+        _ => panic!("expected completed interpretation"),
     }
 }

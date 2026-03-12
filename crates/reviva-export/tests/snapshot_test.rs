@@ -23,6 +23,8 @@ fn fixture_session() -> Session {
             max_tokens: 256,
             timeout_ms: 1000,
             stop_sequences: vec![],
+            cache_prompt: false,
+            slot_id: None,
         },
         response: RevivaResponse {
             status_code: Some(200),
