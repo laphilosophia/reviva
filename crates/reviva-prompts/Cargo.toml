@@ -1,5 +1,5 @@
 [package]
-name    = "reviva-prompts"
+name = "reviva-prompts"
 version.workspace = true
 edition.workspace = true
 
@@ -9,4 +9,3 @@ reviva-core = { workspace = true }
 
 [dev-dependencies]
 insta = { workspace = true }
-

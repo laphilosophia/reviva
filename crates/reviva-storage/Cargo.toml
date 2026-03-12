@@ -1,12 +1,14 @@
 [package]
-name    = "reviva-storage"
+name = "reviva-storage"
 version.workspace = true
 edition.workspace = true
 
 # See docs/module.md §reviva-storage
 [dependencies]
 reviva-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
-

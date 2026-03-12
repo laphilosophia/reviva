@@ -1,21 +1,146 @@
-//! Mock backend integration tests for reviva-backend.
-//!
-//! These tests spin up a local HTTP mock server (httpmock).
-//! No live inference server is required.
-//!
-//! Coverage targets (populated as reviva-backend is implemented):
-//!   - valid completion response is parsed correctly
-//!   - empty response body is surfaced as BackendError::EmptyResponse
-//!   - malformed JSON is surfaced as BackendError::MalformedResponse
-//!   - HTTP 5xx is surfaced as BackendError::ServerError
-//!   - connection refused is surfaced as BackendError::Unreachable
-//!   - timeout is surfaced as BackendError::Timeout (use short timeout in test)
-//!   - raw response is always preserved regardless of error kind
+use httpmock::{Method::POST, MockServer};
+use reviva_backend::{BackendError, CompletionBackend, LlamaCompletionBackend};
+use reviva_core::{BackendSettings, ResponseInterpretation, RevivaRequest};
+use std::time::Duration;
 
-// Placeholder — will be filled as reviva-backend is implemented.
+fn request(base_url: String, timeout_ms: u64) -> RevivaRequest {
+    RevivaRequest {
+        backend: BackendSettings {
+            base_url,
+            model: Some("test-model".to_string()),
+            temperature: 0.1,
+            max_tokens: 256,
+            timeout_ms,
+            stop_sequences: Vec::new(),
+        },
+        prompt: "review this".to_string(),
+    }
+}
+
 #[test]
-fn placeholder_mock_backend() {
-    // TODO: start a MockServer, configure each error scenario,
-    //       call the backend client, assert the correct BackendError variant.
-    assert!(true, "placeholder — replace with httpmock test");
+fn parses_valid_completion_response() {
+    let server = MockServer::start();
+    let mock = server.mock(|when, then| {
+        when.method(POST).path("/completion");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"content":"SUMMARY:\n- good"}"#);
+    });
+
+    let backend = LlamaCompletionBackend::new();
+    let response = backend
+        .complete(&request(server.url(""), 10_000))
+        .expect("request should succeed");
+    mock.assert();
+    match response.response_interpretation {
+        ResponseInterpretation::Completed { content } => {
+            assert!(content.contains("SUMMARY"));
+        }
+        _ => panic!("expected completed interpretation"),
+    }
+    assert!(response.raw_http_body.contains("\"content\""));
+}
+
+#[test]
+fn empty_response_maps_to_empty_error() {
+    let server = MockServer::start();
+    server.mock(|when, then| {
+        when.method(POST).path("/completion");
+        then.status(200).body(r#"{"content":""}"#);
+    });
+
+    let backend = LlamaCompletionBackend::new();
+    let error = backend
+        .complete(&request(server.url(""), 10_000))
+        .expect_err("should fail");
+    match error {
+        BackendError::EmptyResponse {
+            status_code,
+            raw_http_body,
+        } => {
+            assert_eq!(status_code, 200);
+            assert!(raw_http_body.contains("content"));
+        }
+        _ => panic!("unexpected error: {error:?}"),
+    }
+}
+
+#[test]
+fn malformed_json_maps_to_malformed_error() {
+    let server = MockServer::start();
+    server.mock(|when, then| {
+        when.method(POST).path("/completion");
+        then.status(200).body("not-json");
+    });
+
+    let backend = LlamaCompletionBackend::new();
+    let error = backend
+        .complete(&request(server.url(""), 10_000))
+        .expect_err("should fail");
+    match error {
+        BackendError::MalformedResponse {
+            status_code,
+            raw_http_body,
+        } => {
+            assert_eq!(status_code, 200);
+            assert_eq!(raw_http_body, "not-json");
+        }
+        _ => panic!("unexpected error: {error:?}"),
+    }
+}
+
+#[test]
+fn server_error_maps_to_server_error() {
+    let server = MockServer::start();
+    server.mock(|when, then| {
+        when.method(POST).path("/completion");
+        then.status(503).body("down");
+    });
+
+    let backend = LlamaCompletionBackend::new();
+    let error = backend
+        .complete(&request(server.url(""), 10_000))
+        .expect_err("should fail");
+    match error {
+        BackendError::ServerError {
+            status_code,
+            raw_http_body,
+        } => {
+            assert_eq!(status_code, 503);
+            assert_eq!(raw_http_body, "down");
+        }
+        _ => panic!("unexpected error: {error:?}"),
+    }
+}
+
+#[test]
+fn unreachable_backend_maps_to_unreachable() {
+    let backend = LlamaCompletionBackend::new();
+    let error = backend
+        .complete(&request("http://127.0.0.1:1".to_string(), 300))
+        .expect_err("should fail");
+    match error {
+        BackendError::Unreachable(_) | BackendError::Transport(_) | BackendError::Timeout => {}
+        _ => panic!("unexpected error: {error:?}"),
+    }
+}
+
+#[test]
+fn timeout_maps_to_timeout_error() {
+    let server = MockServer::start();
+    server.mock(|when, then| {
+        when.method(POST).path("/completion");
+        then.status(200)
+            .delay(Duration::from_millis(250))
+            .body(r#"{"content":"late"}"#);
+    });
+
+    let backend = LlamaCompletionBackend::new();
+    let error = backend
+        .complete(&request(server.url(""), 50))
+        .expect_err("should timeout");
+    match error {
+        BackendError::Timeout | BackendError::Transport(_) => {}
+        _ => panic!("unexpected error: {error:?}"),
+    }
 }

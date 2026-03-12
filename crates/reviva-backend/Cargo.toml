@@ -1,12 +1,13 @@
 [package]
-name    = "reviva-backend"
+name = "reviva-backend"
 version.workspace = true
 edition.workspace = true
 
 # See docs/module.md §reviva-backend
 [dependencies]
 reviva-core = { workspace = true }
+reqwest = { workspace = true }
+serde_json = { workspace = true }
 
 [dev-dependencies]
 httpmock = { workspace = true }
-

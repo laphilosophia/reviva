@@ -1,5 +1,5 @@
 [package]
-name    = "reviva-cli"
+name = "reviva-cli"
 version.workspace = true
 edition.workspace = true
 
@@ -10,9 +10,14 @@ name = "reviva"
 path = "src/main.rs"
 
 [dependencies]
-reviva-core    = { workspace = true }
-reviva-repo    = { workspace = true }
+reviva-core = { workspace = true }
+reviva-repo = { workspace = true }
 reviva-prompts = { workspace = true }
 reviva-backend = { workspace = true }
 reviva-storage = { workspace = true }
-reviva-export  = { workspace = true }
+reviva-export = { workspace = true }
+
+[dev-dependencies]
+httpmock = { workspace = true }
+serde_json = { workspace = true }
+tempfile = { workspace = true }

@@ -1,14 +1,14 @@
 [workspace]
 resolver = "2"
 members = [
-  "crates/reviva-core",
-  "crates/reviva-repo",
-  "crates/reviva-prompts",
-  "crates/reviva-backend",
-  "crates/reviva-storage",
-  "crates/reviva-export",
-  "crates/reviva-cli",
-  "crates/reviva-tui",
+    "crates/reviva-core",
+    "crates/reviva-repo",
+    "crates/reviva-prompts",
+    "crates/reviva-backend",
+    "crates/reviva-storage",
+    "crates/reviva-export",
+    "crates/reviva-cli",
+    "crates/reviva-tui",
 ]
 
 [workspace.package]
@@ -26,11 +26,21 @@ reviva-prompts = { path = "crates/reviva-prompts" }
 reviva-backend = { path = "crates/reviva-backend" }
 reviva-storage = { path = "crates/reviva-storage" }
 reviva-export = { path = "crates/reviva-export" }
+ignore = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+reqwest = { version = "0.12", default-features = false, features = [
+    "blocking",
+    "json",
+    "rustls-tls",
+] }
 
 # ─── Test infrastructure (dev-only) ─────────────────────────────────────────
 # insta: snapshot testing for prompt builder and export format regression.
-insta     = { version = "1", features = ["yaml"] }
+insta = { version = "1", features = ["yaml"] }
 # httpmock: mock HTTP server for backend error-path tests (no live model).
-httpmock  = "0.7"
+httpmock = "0.7"
 # tempfile: ephemeral directories for fixture-based integration tests.
-tempfile  = "3"
+tempfile = "3"

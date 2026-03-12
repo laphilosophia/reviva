@@ -1,12 +1,12 @@
 [package]
-name    = "reviva-repo"
+name = "reviva-repo"
 version.workspace = true
 edition.workspace = true
 
 # See docs/module.md §reviva-repo
 [dependencies]
 reviva-core = { workspace = true }
+ignore = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
-

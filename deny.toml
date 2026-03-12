@@ -3,15 +3,15 @@
 
 # ─── Advisories ──────────────────────────────────────────────────────────────
 [advisories]
-version          = 2
+version = 2
 # Deny all crates with known security vulnerabilities.
-db-path          = "~/.cargo/advisory-db"
-db-urls          = ["https://github.com/rustsec/advisory-db"]
-yanked           = "deny"
+db-path = "~/.cargo/advisory-db"
+db-urls = ["https://github.com/rustsec/advisory-db"]
+yanked = "deny"
 
 # ─── Licenses ────────────────────────────────────────────────────────────────
 [licenses]
-version          = 2
+version = 2
 # Allow only OSI-approved permissive licenses.
 allow = [
     "MIT",
@@ -31,13 +31,13 @@ confidence-threshold = 0.8
 # Deny multiple versions of the same crate unless explicitly allowed.
 multiple-versions = "deny"
 # Do not allow wildcard dependencies.
-wildcards         = "deny"
+wildcards = "deny"
 # Deny proc-macro crates that pull in syn 1.x and syn 2.x simultaneously.
-highlight         = "all"
+highlight = "all"
 
 # ─── Sources ─────────────────────────────────────────────────────────────────
 [sources]
 # Only allow crates from crates.io unless explicitly listed below.
 unknown-registry = "deny"
-unknown-git      = "deny"
-allow-registry   = ["https://github.com/rust-lang/crates.io-index"]
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
