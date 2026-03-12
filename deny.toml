@@ -1,0 +1,43 @@
+# cargo-deny configuration
+# https://embarkstudios.github.io/cargo-deny/
+
+# ─── Advisories ──────────────────────────────────────────────────────────────
+[advisories]
+version          = 2
+# Deny all crates with known security vulnerabilities.
+db-path          = "~/.cargo/advisory-db"
+db-urls          = ["https://github.com/rustsec/advisory-db"]
+yanked           = "deny"
+
+# ─── Licenses ────────────────────────────────────────────────────────────────
+[licenses]
+version          = 2
+# Allow only OSI-approved permissive licenses.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "ISC",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "Unicode-DFS-2016",
+    "Zlib",
+]
+# Confidence threshold for license detection (0.0–1.0).
+confidence-threshold = 0.8
+
+# ─── Bans ────────────────────────────────────────────────────────────────────
+[bans]
+# Deny multiple versions of the same crate unless explicitly allowed.
+multiple-versions = "deny"
+# Do not allow wildcard dependencies.
+wildcards         = "deny"
+# Deny proc-macro crates that pull in syn 1.x and syn 2.x simultaneously.
+highlight         = "all"
+
+# ─── Sources ─────────────────────────────────────────────────────────────────
+[sources]
+# Only allow crates from crates.io unless explicitly listed below.
+unknown-registry = "deny"
+unknown-git      = "deny"
+allow-registry   = ["https://github.com/rust-lang/crates.io-index"]

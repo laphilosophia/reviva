@@ -6,3 +6,7 @@ edition.workspace = true
 # See docs/module.md §reviva-backend
 [dependencies]
 reviva-core = { workspace = true }
+
+[dev-dependencies]
+httpmock = { workspace = true }
+

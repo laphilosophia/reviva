@@ -1,0 +1,112 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ─── Format check ───────────────────────────────────────────────────────────
+  fmt:
+    name: fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+  # ─── Clippy ─────────────────────────────────────────────────────────────────
+  clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo clippy (deny warnings)
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+  # ─── Dependency checks (license, advisories, bans, sources) ─────────────────
+  deny:
+    name: deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+
+  # ─── Build + Unit tests ─────────────────────────────────────────────────────
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo check
+        run: cargo check --workspace --all-targets
+      - name: cargo test (unit)
+        run: cargo test --workspace --lib --bins
+
+  # ─── Integration tests (fixture-based, no live model) ───────────────────────
+  # Covers: ignore handling, binary skip, selection, prompt build,
+  #         oversized target refusal, session save/load, finding extraction.
+  # Populated incrementally as crates are implemented.
+  integration:
+    name: integration
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo test (integration)
+        run: cargo test --workspace --test '*'
+
+  # ─── Snapshot tests (prompt builder + export format) ────────────────────────
+  # Verifies that prompt construction and Markdown/JSON export shapes
+  # do not silently regress. Uses `insta` for snapshot diffing.
+  # Populated once reviva-prompts and reviva-export are implemented.
+  snapshots:
+    name: snapshots
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo test (snapshots)
+        run: cargo test --workspace --test '*snapshot*'
+      # Fail if any snapshot is unreviewed (insta's default behavior).
+      - name: check for unreviewed snapshots
+        run: |
+          if find . -name "*.snap.new" | grep -q .; then
+            echo "Unreviewed insta snapshots found — run 'cargo insta review'"
+            exit 1
+          fi
+
+  # ─── Mock backend integration ───────────────────────────────────────────────
+  # Verifies error handling without a live inference server:
+  # timeout, empty response, malformed response, unreachable backend.
+  # Populated once reviva-backend is implemented.
+  mock-backend:
+    name: mock-backend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo test (mock backend)
+        run: cargo test --workspace --test '*mock*'
+

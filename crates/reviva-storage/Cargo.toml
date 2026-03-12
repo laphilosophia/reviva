@@ -6,3 +6,7 @@ edition.workspace = true
 # See docs/module.md §reviva-storage
 [dependencies]
 reviva-core = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+

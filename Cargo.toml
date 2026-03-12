@@ -26,3 +26,11 @@ reviva-prompts = { path = "crates/reviva-prompts" }
 reviva-backend = { path = "crates/reviva-backend" }
 reviva-storage = { path = "crates/reviva-storage" }
 reviva-export = { path = "crates/reviva-export" }
+
+# ─── Test infrastructure (dev-only) ─────────────────────────────────────────
+# insta: snapshot testing for prompt builder and export format regression.
+insta     = { version = "1", features = ["yaml"] }
+# httpmock: mock HTTP server for backend error-path tests (no live model).
+httpmock  = "0.7"
+# tempfile: ephemeral directories for fixture-based integration tests.
+tempfile  = "3"

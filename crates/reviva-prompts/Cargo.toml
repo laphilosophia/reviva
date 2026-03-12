@@ -6,3 +6,7 @@ edition.workspace = true
 # See docs/module.md §reviva-prompts
 [dependencies]
 reviva-core = { workspace = true }
+
+[dev-dependencies]
+insta = { workspace = true }
+
