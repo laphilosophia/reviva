@@ -8,6 +8,8 @@ version = 2
 db-path = "~/.cargo/advisory-db"
 db-urls = ["https://github.com/rustsec/advisory-db"]
 yanked = "deny"
+# httpmock pulls async-std in dev-only tests; accepted until test harness is replaced.
+ignore = ["RUSTSEC-2025-0052"]
 
 # ─── Licenses ────────────────────────────────────────────────────────────────
 [licenses]
@@ -21,6 +23,8 @@ allow = [
     "BSD-2-Clause",
     "BSD-3-Clause",
     "Unicode-DFS-2016",
+    "Unicode-3.0",
+    "CDLA-Permissive-2.0",
     "Zlib",
 ]
 # Confidence threshold for license detection (0.0–1.0).
@@ -34,6 +38,8 @@ multiple-versions = "deny"
 wildcards = "deny"
 # Deny proc-macro crates that pull in syn 1.x and syn 2.x simultaneously.
 highlight = "all"
+# Windows support crates commonly appear in multiple versions transitively.
+skip = [{ name = "windows-sys" }]
 
 # ─── Sources ─────────────────────────────────────────────────────────────────
 [sources]

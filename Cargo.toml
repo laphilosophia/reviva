@@ -15,17 +15,17 @@ members = [
 version = "0.1.0"
 edition = "2021"
 authors = ["Erdem Arslan"]
-license = "see LICENSE"
+license = "Apache-2.0"
 repository = ""
 
 # Shared dependency versions — pin here, reference with { workspace = true } in crates
 [workspace.dependencies]
-reviva-core = { path = "crates/reviva-core" }
-reviva-repo = { path = "crates/reviva-repo" }
-reviva-prompts = { path = "crates/reviva-prompts" }
-reviva-backend = { path = "crates/reviva-backend" }
-reviva-storage = { path = "crates/reviva-storage" }
-reviva-export = { path = "crates/reviva-export" }
+reviva-core = { path = "crates/reviva-core", version = "0.1.0" }
+reviva-repo = { path = "crates/reviva-repo", version = "0.1.0" }
+reviva-prompts = { path = "crates/reviva-prompts", version = "0.1.0" }
+reviva-backend = { path = "crates/reviva-backend", version = "0.1.0" }
+reviva-storage = { path = "crates/reviva-storage", version = "0.1.0" }
+reviva-export = { path = "crates/reviva-export", version = "0.1.0" }
 ignore = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
