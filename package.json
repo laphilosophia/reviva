@@ -1,0 +1,12 @@
+{
+  "name": "reviva",
+  "version": "1.0.0",
+  "description": "Local-first code review terminal",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "Erdem Arslan <me@erdem.work>",
+  "license": "Apache-2.0"
+}
