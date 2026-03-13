@@ -734,9 +734,7 @@ enum ResponseInterpretationDto {
 impl From<core::ResponseInterpretation> for ResponseInterpretationDto {
     fn from(value: core::ResponseInterpretation) -> Self {
         match value {
-            core::ResponseInterpretation::Completed { content } => {
-                Self::Completed { content }
-            }
+            core::ResponseInterpretation::Completed { content } => Self::Completed { content },
             core::ResponseInterpretation::Empty => Self::Empty,
             core::ResponseInterpretation::Malformed { reason } => Self::Malformed { reason },
         }

@@ -1,6 +1,6 @@
 use crate::core;
-use ignore::WalkBuilder;
 use core::RevivaTarget;
+use ignore::WalkBuilder;
 use std::collections::HashSet;
 use std::fmt;
 use std::fs;
