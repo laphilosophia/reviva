@@ -34,7 +34,7 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - name: cargo clippy (deny warnings)
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+        run: cargo clippy --all-targets --all-features -- -D warnings
 
   # ─── Dependency checks (license, advisories, bans, sources) ─────────────────
   deny:
@@ -57,9 +57,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: cargo check
-        run: cargo check --workspace --all-targets
+        run: cargo check --all-targets
       - name: cargo test (unit)
-        run: cargo test --workspace --lib --bins
+        run: cargo test --all-targets
 
   # ─── Integration tests (fixture-based, no live model) ───────────────────────
   # Covers: ignore handling, binary skip, selection, prompt build,
@@ -73,7 +73,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: cargo test (integration)
-        run: cargo test --workspace --test '*'
+        run: cargo test --tests
 
   # ─── Snapshot tests (prompt builder + export format) ────────────────────────
   # Verifies that prompt construction and Markdown/JSON export shapes
@@ -87,7 +87,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: cargo test (snapshots)
-        run: cargo test --workspace --test '*snapshot*'
+        run: cargo test snapshot
       # Fail if any snapshot is unreviewed (insta's default behavior).
       - name: check for unreviewed snapshots
         run: |
@@ -108,5 +108,5 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: cargo test (mock backend)
-        run: cargo test --workspace --test '*mock*'
+        run: cargo test mock_backend_test
 

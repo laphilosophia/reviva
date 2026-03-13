@@ -1,5 +1,6 @@
+use crate::core;
+use core::{ResponseInterpretation, RevivaRequest, RevivaResponse};
 use reqwest::blocking::Client;
-use reviva_core::{ResponseInterpretation, RevivaRequest, RevivaResponse};
 use serde_json::Value;
 use std::fmt;
 use std::time::Duration;

@@ -1525,84 +1525,17 @@ dependencies = [
 ]
 
 [[package]]
-name = "reviva-backend"
+name = "reviva"
 version = "0.1.0"
 dependencies = [
  "httpmock",
- "reqwest",
- "reviva-core",
- "serde_json",
-]
-
-[[package]]
-name = "reviva-cli"
-version = "0.1.0"
-dependencies = [
- "httpmock",
- "reviva-backend",
- "reviva-core",
- "reviva-export",
- "reviva-prompts",
- "reviva-repo",
- "reviva-storage",
- "serde_json",
- "tempfile",
-]
-
-[[package]]
-name = "reviva-core"
-version = "0.1.0"
-
-[[package]]
-name = "reviva-export"
-version = "0.1.0"
-dependencies = [
- "insta",
- "reviva-core",
- "serde_json",
- "tempfile",
-]
-
-[[package]]
-name = "reviva-prompts"
-version = "0.1.0"
-dependencies = [
- "insta",
- "reviva-core",
- "serde",
- "toml",
-]
-
-[[package]]
-name = "reviva-repo"
-version = "0.1.0"
-dependencies = [
  "ignore",
- "reviva-core",
- "tempfile",
-]
-
-[[package]]
-name = "reviva-storage"
-version = "0.1.0"
-dependencies = [
- "reviva-core",
+ "insta",
+ "reqwest",
  "serde",
  "serde_json",
  "tempfile",
  "toml",
-]
-
-[[package]]
-name = "reviva-tui"
-version = "0.1.0"
-dependencies = [
- "reviva-backend",
- "reviva-core",
- "reviva-export",
- "reviva-prompts",
- "reviva-repo",
- "reviva-storage",
 ]
 
 [[package]]

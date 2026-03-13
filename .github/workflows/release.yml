@@ -51,7 +51,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Build reviva
-        run: cargo build --release -p reviva-cli --target ${{ matrix.target }}
+        run: cargo build --release -p reviva --target ${{ matrix.target }}
 
       - name: Package (tar.gz)
         if: matrix.archive_format == 'tar.gz'

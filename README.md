@@ -79,7 +79,7 @@ cargo build
 1. Run from workspace:
 
 ```bash
-cargo run -p reviva-cli -- --help
+cargo run -p reviva -- --help
 ```
 
 If installed as a binary, command name is `reviva`.
@@ -255,7 +255,7 @@ KV cache options:
 Run tests:
 
 ```bash
-cargo test -p reviva-prompts -p reviva-cli -p reviva-storage -p reviva-export
+cargo test --all-targets
 ```
 
 Format:
@@ -267,3 +267,4 @@ cargo fmt
 ## License
 
 Apache-2.0
+

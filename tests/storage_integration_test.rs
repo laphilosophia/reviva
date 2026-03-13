@@ -1,9 +1,9 @@
-use reviva_core::{
+use reviva::core::{
     BackendSettings, Confidence, Finding, NormalizationState, ProfileMetadata,
     ResponseInterpretation, RevivaMode, RevivaResponse, RevivaTarget, Session, Severity,
     SeverityOrigin,
 };
-use reviva_storage::{AppConfig, Storage, StorageError};
+use reviva::storage::{AppConfig, Storage, StorageError};
 use tempfile::TempDir;
 
 fn fixture_session() -> Session {
@@ -98,7 +98,7 @@ fn roundtrip_session_config_and_set() {
         .exists());
     assert!(storage.root().join("findings").join("index.json").exists());
 
-    let set = reviva_core::NamedSet {
+    let set = reviva::core::NamedSet {
         name: "critical".to_string(),
         paths: vec!["src/main.rs".to_string()],
     };
@@ -160,7 +160,7 @@ fn review_cache_session_link_roundtrip() {
 fn config_reference_table_stays_in_sync_with_app_config_fields() {
     use std::collections::BTreeSet;
 
-    let docs = include_str!("../../../docs/config-reference.md");
+    let docs = include_str!("../docs/config-reference.md");
     let mut fields = Vec::<String>::new();
     let mut in_table = false;
 

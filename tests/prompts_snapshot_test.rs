@@ -1,5 +1,5 @@
-use reviva_core::{BoundaryTarget, RevivaMode, RevivaTarget};
-use reviva_prompts::{
+use reviva::core::{BoundaryTarget, RevivaMode, RevivaTarget};
+use reviva::prompts::{
     apply_prompt_wrapper, build_prompt, built_in_review_profile, default_review_profile,
     normalize_findings, normalize_findings_for_profile_with_reasons,
     normalize_findings_with_reasons, parse_prompt_wrapper, parse_review_profile_toml,

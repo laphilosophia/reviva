@@ -1,16 +1,16 @@
-use reviva_core::{
+use reviva::core::{
     BackendSettings, Confidence, Finding, NormalizationState, ProfileMetadata,
     ResponseInterpretation, RevivaMode, RevivaResponse, RevivaTarget, Session, Severity,
     SeverityOrigin,
 };
-use reviva_export::{export_session_json, export_session_markdown};
+use reviva::export::{export_session_json, export_session_markdown};
 
 fn fixture_session() -> Session {
     Session {
         id: "session-123".to_string(),
         repository_root: "/repo".to_string(),
         review_mode: RevivaMode::Boundary,
-        selected_target: RevivaTarget::Boundary(reviva_core::BoundaryTarget {
+        selected_target: RevivaTarget::Boundary(reviva::core::BoundaryTarget {
             left: "src/left.rs".to_string(),
             right: "src/right.rs".to_string(),
         }),

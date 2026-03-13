@@ -1,19 +1,24 @@
-use reviva_backend::{CompletionBackend, LlamaCompletionBackend};
-use reviva_core::{
+use crate::backend;
+use crate::core;
+use crate::export;
+use crate::prompts;
+use crate::repo;
+use crate::storage;
+use backend::{CompletionBackend, LlamaCompletionBackend};
+use core::{
     BackendSettings, BoundaryTarget, NamedSet, ProfileMetadata, ResponseInterpretation, RevivaMode,
     RevivaRequest, RevivaResponse, RevivaTarget, Session,
 };
-use reviva_export::{export_session_json, export_session_markdown};
-use reviva_prompts::{
+use export::{export_session_json, export_session_markdown};
+use prompts::{
     apply_prompt_wrapper, build_prompt, normalize_findings_for_profile_with_reasons,
     parse_prompt_wrapper, parse_review_profile_toml, resolve_built_in_review_profile,
     PromptBuildConfig, PromptFile, PromptWrapper, ReviewProfileSpec,
 };
-use reviva_repo::{
+use repo::{
     estimated_target_tokens, load_incremental_target_files, load_target_files,
     resolve_incremental_target, scan_repository, LoadedFile, RepoScanConfig,
 };
-use reviva_storage::{AppConfig, RepoMap, RepoMapEntry, Storage};
 use std::collections::BTreeMap;
 use std::env;
 use std::fs;
@@ -23,15 +28,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use storage::{AppConfig, RepoMap, RepoMapEntry, Storage};
 
-fn main() {
-    if let Err(error) = run() {
-        eprintln!("error: {error}");
-        std::process::exit(1);
-    }
-}
-
-fn run() -> Result<(), String> {
+pub(crate) fn run() -> Result<(), String> {
     let args = env::args().collect::<Vec<_>>();
     if args.len() < 2 {
         print_usage();
@@ -1746,28 +1745,28 @@ fn response_preview(value: &ResponseInterpretation, max_chars: usize) -> String 
     clipped
 }
 
-fn summarize_normalization_states(findings: &[reviva_core::Finding]) -> (usize, usize, usize) {
+fn summarize_normalization_states(findings: &[core::Finding]) -> (usize, usize, usize) {
     let mut structured = 0_usize;
     let mut partial = 0_usize;
     let mut raw_only = 0_usize;
     for finding in findings {
         match finding.normalization_state {
-            reviva_core::NormalizationState::Structured => structured += 1,
-            reviva_core::NormalizationState::Partial => partial += 1,
-            reviva_core::NormalizationState::RawOnly => raw_only += 1,
+            core::NormalizationState::Structured => structured += 1,
+            core::NormalizationState::Partial => partial += 1,
+            core::NormalizationState::RawOnly => raw_only += 1,
         }
     }
     (structured, partial, raw_only)
 }
 
-fn format_severity_label(severity: Option<reviva_core::Severity>) -> &'static str {
+fn format_severity_label(severity: Option<core::Severity>) -> &'static str {
     match severity {
         Some(value) => value.as_str(),
         None => "unrated",
     }
 }
 
-fn format_finding_headline(finding: &reviva_core::Finding) -> String {
+fn format_finding_headline(finding: &core::Finding) -> String {
     let mut line = finding.summary.clone();
     if let Some(location) = finding.location_hint.as_deref() {
         line.push_str(" @ ");
@@ -1781,23 +1780,21 @@ fn format_finding_headline(finding: &reviva_core::Finding) -> String {
     line
 }
 
-fn print_findings_triage(findings: &[reviva_core::Finding]) {
+fn print_findings_triage(findings: &[core::Finding]) {
     println!();
     println!("triage.total_findings: {}", findings.len());
 
     let structured = findings
         .iter()
-        .filter(|finding| {
-            finding.normalization_state == reviva_core::NormalizationState::Structured
-        })
+        .filter(|finding| finding.normalization_state == core::NormalizationState::Structured)
         .count();
     let partial = findings
         .iter()
-        .filter(|finding| finding.normalization_state == reviva_core::NormalizationState::Partial)
+        .filter(|finding| finding.normalization_state == core::NormalizationState::Partial)
         .count();
     let raw_only = findings
         .iter()
-        .filter(|finding| finding.normalization_state == reviva_core::NormalizationState::RawOnly)
+        .filter(|finding| finding.normalization_state == core::NormalizationState::RawOnly)
         .count();
     println!(
         "triage.by_state: structured={} partial={} raw_only={}",
@@ -1806,15 +1803,15 @@ fn print_findings_triage(findings: &[reviva_core::Finding]) {
 
     let model_labeled = findings
         .iter()
-        .filter(|finding| finding.severity_origin == reviva_core::SeverityOrigin::ModelLabeled)
+        .filter(|finding| finding.severity_origin == core::SeverityOrigin::ModelLabeled)
         .count();
     let normalized = findings
         .iter()
-        .filter(|finding| finding.severity_origin == reviva_core::SeverityOrigin::Normalized)
+        .filter(|finding| finding.severity_origin == core::SeverityOrigin::Normalized)
         .count();
     let unrated = findings
         .iter()
-        .filter(|finding| finding.severity_origin == reviva_core::SeverityOrigin::Unrated)
+        .filter(|finding| finding.severity_origin == core::SeverityOrigin::Unrated)
         .count();
     println!(
         "triage.by_origin: model_labeled={} normalized={} unrated={}",
@@ -1823,19 +1820,19 @@ fn print_findings_triage(findings: &[reviva_core::Finding]) {
 
     let critical = findings
         .iter()
-        .filter(|finding| finding.severity == Some(reviva_core::Severity::Critical))
+        .filter(|finding| finding.severity == Some(core::Severity::Critical))
         .count();
     let high = findings
         .iter()
-        .filter(|finding| finding.severity == Some(reviva_core::Severity::High))
+        .filter(|finding| finding.severity == Some(core::Severity::High))
         .count();
     let medium = findings
         .iter()
-        .filter(|finding| finding.severity == Some(reviva_core::Severity::Medium))
+        .filter(|finding| finding.severity == Some(core::Severity::Medium))
         .count();
     let low = findings
         .iter()
-        .filter(|finding| finding.severity == Some(reviva_core::Severity::Low))
+        .filter(|finding| finding.severity == Some(core::Severity::Low))
         .count();
     let severity_unrated = findings
         .iter()
@@ -1848,19 +1845,19 @@ fn print_findings_triage(findings: &[reviva_core::Finding]) {
 
     let confidence_high = findings
         .iter()
-        .filter(|finding| finding.confidence == reviva_core::Confidence::High)
+        .filter(|finding| finding.confidence == core::Confidence::High)
         .count();
     let confidence_medium = findings
         .iter()
-        .filter(|finding| finding.confidence == reviva_core::Confidence::Medium)
+        .filter(|finding| finding.confidence == core::Confidence::Medium)
         .count();
     let confidence_low = findings
         .iter()
-        .filter(|finding| finding.confidence == reviva_core::Confidence::Low)
+        .filter(|finding| finding.confidence == core::Confidence::Low)
         .count();
     let confidence_unknown = findings
         .iter()
-        .filter(|finding| finding.confidence == reviva_core::Confidence::Unknown)
+        .filter(|finding| finding.confidence == core::Confidence::Unknown)
         .count();
     println!(
         "triage.by_confidence: high={} medium={} low={} unknown={}",
@@ -1886,10 +1883,10 @@ fn print_findings_triage(findings: &[reviva_core::Finding]) {
     let low_confidence_high_severity = findings
         .iter()
         .filter(|finding| {
-            finding.confidence == reviva_core::Confidence::Low
+            finding.confidence == core::Confidence::Low
                 && matches!(
                     finding.severity,
-                    Some(reviva_core::Severity::High) | Some(reviva_core::Severity::Critical)
+                    Some(core::Severity::High) | Some(core::Severity::Critical)
                 )
         })
         .count();
@@ -1914,7 +1911,7 @@ fn print_findings_triage(findings: &[reviva_core::Finding]) {
     }
 }
 
-fn repeated_summary_clusters(findings: &[reviva_core::Finding]) -> Vec<(String, usize)> {
+fn repeated_summary_clusters(findings: &[core::Finding]) -> Vec<(String, usize)> {
     let mut summary_counts = BTreeMap::new();
     for finding in findings {
         let key = normalize_summary_for_triage(&finding.summary);
@@ -1960,13 +1957,13 @@ fn is_docs_like_path(path: &str) -> bool {
         || lower.contains("\\docs\\")
 }
 
-fn apply_docs_only_finding_guardrail(findings: &mut Vec<reviva_core::Finding>) -> usize {
+fn apply_docs_only_finding_guardrail(findings: &mut Vec<core::Finding>) -> usize {
     let before = findings.len();
     findings.retain(|finding| {
         if !is_docs_runtime_risk_class(finding.risk_class.as_deref()) {
             return true;
         }
-        finding.confidence == reviva_core::Confidence::High
+        finding.confidence == core::Confidence::High
     });
     before.saturating_sub(findings.len())
 }
@@ -2056,7 +2053,7 @@ mod tests {
         extract_incremental_warnings, is_docs_like_path, is_healthy_status_code,
         parse_http_host_port, CLI_USAGE_LINES,
     };
-    use reviva_core::{
+    use crate::core::{
         Confidence, Finding, NormalizationState, RevivaMode, Severity, SeverityOrigin,
     };
 
@@ -2180,7 +2177,7 @@ mod tests {
 
     #[test]
     fn cli_usage_stays_in_sync_with_docs_command_index() {
-        let docs = include_str!("../../../docs/cli-reference.md");
+        let docs = include_str!("../docs/cli-reference.md");
         let mut command_lines = Vec::<&str>::new();
         let mut in_block = false;
         let mut found_index = false;
@@ -2218,7 +2215,7 @@ mod tests {
 
     #[test]
     fn readme_core_concepts_headings_stay_in_sync() {
-        let readme = include_str!("../../../README.md");
+        let readme = include_str!("../README.md");
         let mut in_core_concepts = false;
         let mut headings = Vec::<&str>::new();
 

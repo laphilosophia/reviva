@@ -1,5 +1,5 @@
 use httpmock::{Method::POST, MockServer};
-use reviva_storage::Storage;
+use reviva::storage::Storage;
 use serde_json::Value;
 use std::fs;
 use std::path::Path;

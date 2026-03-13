@@ -1,4 +1,5 @@
-use reviva_core::{ResponseInterpretation, Session};
+use crate::core;
+use core::{ResponseInterpretation, Session};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 
@@ -324,17 +325,17 @@ fn line_count(value: &str) -> usize {
     }
 }
 
-fn format_target(target: &reviva_core::RevivaTarget) -> String {
+fn format_target(target: &core::RevivaTarget) -> String {
     match target {
-        reviva_core::RevivaTarget::Single(path) => format!("single:{path}"),
-        reviva_core::RevivaTarget::Set(paths) => format!("set:[{}]", paths.join(", ")),
-        reviva_core::RevivaTarget::Boundary(boundary) => {
+        core::RevivaTarget::Single(path) => format!("single:{path}"),
+        core::RevivaTarget::Set(paths) => format!("set:[{}]", paths.join(", ")),
+        core::RevivaTarget::Boundary(boundary) => {
             format!("boundary:left={} right={}", boundary.left, boundary.right)
         }
     }
 }
 
-fn repeated_summary_clusters(findings: &[reviva_core::Finding]) -> Vec<(String, usize)> {
+fn repeated_summary_clusters(findings: &[core::Finding]) -> Vec<(String, usize)> {
     let mut summary_counts = BTreeMap::new();
     for finding in findings {
         let key = normalize_summary_for_triage(&finding.summary);

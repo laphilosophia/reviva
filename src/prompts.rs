@@ -1,4 +1,5 @@
-use reviva_core::{
+use crate::core;
+use core::{
     Confidence, Finding, NormalizationState, RevivaMode, RevivaTarget, Severity, SeverityOrigin,
 };
 use serde::Deserialize;

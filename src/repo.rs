@@ -1,5 +1,6 @@
+use crate::core;
 use ignore::WalkBuilder;
-use reviva_core::RevivaTarget;
+use core::RevivaTarget;
 use std::collections::HashSet;
 use std::fmt;
 use std::fs;
@@ -747,7 +748,7 @@ fn git_diff_patch_for_file(
 #[cfg(test)]
 mod tests {
     use super::{load_target_files, scan_repository, RepoError, RepoScanConfig};
-    use reviva_core::RevivaTarget;
+    use crate::core::RevivaTarget;
     use std::fs;
     use tempfile::TempDir;
 

@@ -1,4 +1,5 @@
-use reviva_core::{
+use crate::core;
+use core::{
     BackendSettings, BoundaryTarget, Confidence, Finding, NamedSet, NormalizationState,
     ProfileMetadata, RevivaMode, RevivaResponse, RevivaTarget, Session, Severity, SeverityOrigin,
 };
@@ -730,19 +731,19 @@ enum ResponseInterpretationDto {
     Malformed { reason: String },
 }
 
-impl From<reviva_core::ResponseInterpretation> for ResponseInterpretationDto {
-    fn from(value: reviva_core::ResponseInterpretation) -> Self {
+impl From<core::ResponseInterpretation> for ResponseInterpretationDto {
+    fn from(value: core::ResponseInterpretation) -> Self {
         match value {
-            reviva_core::ResponseInterpretation::Completed { content } => {
+            core::ResponseInterpretation::Completed { content } => {
                 Self::Completed { content }
             }
-            reviva_core::ResponseInterpretation::Empty => Self::Empty,
-            reviva_core::ResponseInterpretation::Malformed { reason } => Self::Malformed { reason },
+            core::ResponseInterpretation::Empty => Self::Empty,
+            core::ResponseInterpretation::Malformed { reason } => Self::Malformed { reason },
         }
     }
 }
 
-impl From<ResponseInterpretationDto> for reviva_core::ResponseInterpretation {
+impl From<ResponseInterpretationDto> for core::ResponseInterpretation {
     fn from(value: ResponseInterpretationDto) -> Self {
         match value {
             ResponseInterpretationDto::Completed { content } => Self::Completed { content },

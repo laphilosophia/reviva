@@ -1,6 +1,6 @@
 use httpmock::{Method::POST, MockServer};
-use reviva_backend::{BackendError, CompletionBackend, LlamaCompletionBackend};
-use reviva_core::{BackendSettings, ResponseInterpretation, RevivaRequest};
+use reviva::backend::{BackendError, CompletionBackend, LlamaCompletionBackend};
+use reviva::core::{BackendSettings, ResponseInterpretation, RevivaRequest};
 use std::time::Duration;
 
 fn request(base_url: String, timeout_ms: u64) -> RevivaRequest {

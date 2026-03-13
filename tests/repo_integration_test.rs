@@ -1,5 +1,5 @@
-use reviva_core::RevivaTarget;
-use reviva_repo::{
+use reviva::core::RevivaTarget;
+use reviva::repo::{
     load_incremental_target_files, load_target_files, resolve_incremental_target, scan_repository,
     RepoError, RepoScanConfig,
 };
