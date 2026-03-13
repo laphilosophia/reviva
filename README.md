@@ -218,7 +218,7 @@ Important behavior:
 - `llama_server_path` is kept as-is only when it is a bare command name (for example `llama-server`).
 - `include`/`exclude` rules are enforced both in scan and explicit review target loading.
 
-## llama-server Integration
+## `llama-server` Integration
 
 Reviva can manage `llama-server` when backend is local (`127.0.0.1:8080` or `localhost:8080`).
 
@@ -248,16 +248,6 @@ KV cache options:
 
 `repo-map.json` is refreshed by `init` (unless `--no-scan`) and `scan`.
 
-## Documentation
-
-- [Specification](docs/spec.md)
-- [Architecture](docs/architecture.md)
-- [Module Boundaries](docs/module.md)
-- [CLI Reference](docs/cli-reference.md)
-- [Config Reference](docs/config-reference.md)
-- [Roadmap](docs/roadmap.md)
-- [Milestones](docs/milestones.md)
-
 ## Development
 
 Run tests:
@@ -275,5 +265,3 @@ cargo fmt
 ## License
 
 Apache-2.0
-
-
