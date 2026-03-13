@@ -7,7 +7,8 @@
 [CLI References](./docs/cli-reference.md) | [Config References](./docs/config-reference.md)
 
 ![LICENSE](https://img.shields.io/badge/license-Apache--2.0-1f6feb?style=flat-square)
-![Rust](https://img.shields.io/badge/rust-stable-f74c00?style=flat-square)
+![Rust](https://img.shields.io/badge/rust-stable-D34516?style=flat-square)
+[![Crates.io](https://img.shields.io/badge/crates-online-61784D?style=flat-square)](https://crates.io/users/laphilosophia)
 ![Interface](https://img.shields.io/badge/interface-CLI-0f766e?style=flat-square)
 ![Inference](https://img.shields.io/badge/inference-local--first-0ea5e9?style=flat-square)
 
