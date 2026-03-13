@@ -1,0 +1,129 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (example: v0.1.0)"
+        required: true
+        type: string
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: build (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            bin_name: reviva
+            archive_name: reviva-linux-x86_64.tar.gz
+            archive_format: tar.gz
+          - name: windows-x86_64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            bin_name: reviva.exe
+            archive_name: reviva-windows-x86_64.zip
+            archive_format: zip
+          - name: macos-aarch64
+            os: macos-14
+            target: aarch64-apple-darwin
+            bin_name: reviva
+            archive_name: reviva-macos-aarch64.tar.gz
+            archive_format: tar.gz
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build reviva
+        run: cargo build --release -p reviva-cli --target ${{ matrix.target }}
+
+      - name: Package (tar.gz)
+        if: matrix.archive_format == 'tar.gz'
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp "target/${{ matrix.target }}/release/${{ matrix.bin_name }}" dist/reviva
+          tar -C dist -czf "${{ matrix.archive_name }}" reviva
+
+      - name: Package (zip)
+        if: matrix.archive_format == 'zip'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/${{ matrix.bin_name }}" "dist/reviva.exe" -Force
+          Compress-Archive -Path "dist/reviva.exe" -DestinationPath "${{ matrix.archive_name }}" -Force
+
+      - name: Upload archive artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.archive_name }}
+          path: ${{ matrix.archive_name }}
+
+  release:
+    name: publish-release
+    runs-on: ubuntu-latest
+    needs: build
+    permissions:
+      contents: write
+    steps:
+      - name: Resolve release tag
+        id: tag
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ inputs.tag }}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
+          case "$TAG" in
+            v*) ;;
+            *)
+              echo "error: release tag must start with 'v' (received: $TAG)"
+              exit 1
+              ;;
+          esac
+          echo "value=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Download all archives
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Flatten artifacts
+        shell: bash
+        run: |
+          find dist -maxdepth 2 -type f -print
+          mkdir -p release-assets
+          find dist -maxdepth 2 -type f -exec cp {} release-assets/ \;
+
+      - name: Generate SHA256SUMS
+        shell: bash
+        run: |
+          cd release-assets
+          sha256sum reviva-*.tar.gz reviva-*.zip > SHA256SUMS
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.value }}
+          target_commitish: ${{ github.sha }}
+          files: |
+            release-assets/reviva-*.tar.gz
+            release-assets/reviva-*.zip
+            release-assets/SHA256SUMS

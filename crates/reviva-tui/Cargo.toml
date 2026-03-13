@@ -3,6 +3,8 @@ name = "reviva-tui"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+description = "Thin optional TUI wrapper for Reviva workflows."
 
 # Optional in v1. Must remain thin — no domain logic.
 # See docs/module.md §reviva-tui
@@ -13,3 +15,5 @@ reviva-prompts = { workspace = true }
 reviva-backend = { workspace = true }
 reviva-storage = { workspace = true }
 reviva-export = { workspace = true }
+
+

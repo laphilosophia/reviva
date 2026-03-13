@@ -16,7 +16,7 @@ version = "0.1.0"
 edition = "2021"
 authors = ["Erdem Arslan"]
 license = "Apache-2.0"
-repository = ""
+repository = "https://github.com/laphilosophia/reviva"
 
 # Shared dependency versions — pin here, reference with { workspace = true } in crates
 [workspace.dependencies]

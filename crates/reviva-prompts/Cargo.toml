@@ -3,6 +3,8 @@ name = "reviva-prompts"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+description = "Prompt building, wrappers, and finding normalization for Reviva."
 
 # See docs/module.md §reviva-prompts
 [dependencies]
@@ -12,3 +14,5 @@ toml = { workspace = true }
 
 [dev-dependencies]
 insta = { workspace = true }
+
+

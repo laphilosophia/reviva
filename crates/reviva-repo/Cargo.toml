@@ -3,6 +3,8 @@ name = "reviva-repo"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+description = "Repository traversal, target loading, and scan heuristics for Reviva."
 
 # See docs/module.md §reviva-repo
 [dependencies]
@@ -11,3 +13,5 @@ ignore = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+
+

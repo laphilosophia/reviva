@@ -9,7 +9,7 @@
 ![LICENSE](https://img.shields.io/badge/license-Apache--2.0-1f6feb?style=flat-square)
 ![Rust](https://img.shields.io/badge/rust-stable-f74c00?style=flat-square)
 ![Interface](https://img.shields.io/badge/interface-CLI-0f766e?style=flat-square)
-![Inference](https://img.shields.io/badge/rust-stable-f74c00?style=flat-square)
+![Inference](https://img.shields.io/badge/inference-local--first-0ea5e9?style=flat-square)
 
 Reviva is a local-first review terminal for deterministic, inspectable, and constrained repository analysis with local LLM backends.
 
@@ -40,8 +40,36 @@ Core principles:
 
 ## Install
 
+Reviva can be installed without Rust.
+
+### Option A: Prebuilt Binary (Recommended)
+
+Linux/macOS:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/laphilosophia/reviva/main/scripts/install/install.sh | sh
+```
+
+Windows PowerShell:
+
+```powershell
+iwr https://raw.githubusercontent.com/laphilosophia/reviva/main/scripts/install/install.ps1 -UseBasicParsing | iex
+```
+
+You can pin a version:
+
+```bash
+REVIVA_VERSION=v0.1.0 curl -fsSL https://raw.githubusercontent.com/laphilosophia/reviva/main/scripts/install/install.sh | sh
+```
+
+```powershell
+$env:REVIVA_VERSION = "v0.1.0"; iwr https://raw.githubusercontent.com/laphilosophia/reviva/main/scripts/install/install.ps1 -UseBasicParsing | iex
+```
+
+### Option B: Build From Source
+
 1. Install Rust (stable toolchain).
-2. Build Reviva:
+2. Build:
 
 ```bash
 cargo build
