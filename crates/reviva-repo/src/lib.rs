@@ -27,6 +27,8 @@ impl FileSuspicion {
 pub struct RepoScanConfig {
     pub max_file_bytes: usize,
     pub include_extensions: Option<Vec<String>>,
+    pub include: Vec<String>,
+    pub exclude: Vec<String>,
 }
 
 impl Default for RepoScanConfig {
@@ -34,6 +36,8 @@ impl Default for RepoScanConfig {
         Self {
             max_file_bytes: 256 * 1024,
             include_extensions: None,
+            include: Vec::new(),
+            exclude: Vec::new(),
         }
     }
 }
@@ -159,6 +163,143 @@ fn has_allowed_extension(path: &Path, allowed: &Option<HashSet<String>>) -> bool
     }
 }
 
+fn normalize_pattern(pattern: &str) -> String {
+    let mut normalized = pattern
+        .trim()
+        .trim_start_matches("./")
+        .trim_start_matches('/')
+        .replace('\\', "/")
+        .to_ascii_lowercase();
+    // Support common globstar forms used in tsconfig-like include/exclude patterns.
+    while normalized.contains("/**/*") {
+        normalized = normalized.replace("/**/*", "/*");
+    }
+    while normalized.contains("/**") {
+        normalized = normalized.replace("/**", "/*");
+    }
+    while normalized.contains("//") {
+        normalized = normalized.replace("//", "/");
+    }
+    normalized
+}
+
+fn wildcard_match(pattern: &str, text: &str) -> bool {
+    let pattern_chars = pattern.chars().collect::<Vec<_>>();
+    let text_chars = text.chars().collect::<Vec<_>>();
+    let mut pattern_index = 0_usize;
+    let mut text_index = 0_usize;
+    let mut star_index = None::<usize>;
+    let mut match_index = 0_usize;
+
+    while text_index < text_chars.len() {
+        if pattern_index < pattern_chars.len()
+            && (pattern_chars[pattern_index] == '?'
+                || pattern_chars[pattern_index] == text_chars[text_index])
+        {
+            pattern_index += 1;
+            text_index += 1;
+            continue;
+        }
+        if pattern_index < pattern_chars.len() && pattern_chars[pattern_index] == '*' {
+            star_index = Some(pattern_index);
+            pattern_index += 1;
+            match_index = text_index;
+            continue;
+        }
+        if let Some(star) = star_index {
+            pattern_index = star + 1;
+            match_index += 1;
+            text_index = match_index;
+            continue;
+        }
+        return false;
+    }
+
+    while pattern_index < pattern_chars.len() && pattern_chars[pattern_index] == '*' {
+        pattern_index += 1;
+    }
+    pattern_index == pattern_chars.len()
+}
+
+fn path_matches_pattern(path: &str, pattern: &str) -> bool {
+    let normalized_path = path.to_ascii_lowercase();
+    let normalized_pattern = normalize_pattern(pattern);
+    if normalized_pattern.is_empty() {
+        return false;
+    }
+    if normalized_pattern.ends_with('/') {
+        return normalized_path.starts_with(&normalized_pattern);
+    }
+    if !normalized_pattern.contains('*') && !normalized_pattern.contains('?') {
+        return normalized_path == normalized_pattern
+            || normalized_path.starts_with(&format!("{normalized_pattern}/"));
+    }
+    wildcard_match(&normalized_pattern, &normalized_path)
+}
+
+fn path_matches_any(path: &str, patterns: &[String]) -> bool {
+    patterns
+        .iter()
+        .any(|pattern| path_matches_pattern(path, pattern))
+}
+
+fn is_excluded_from_auto_review(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    if lower == ".git"
+        || lower.starts_with(".git/")
+        || lower == ".github"
+        || lower.starts_with(".github/")
+        || lower == ".reviva"
+        || lower.starts_with(".reviva/")
+        || lower == "node_modules"
+        || lower.starts_with("node_modules/")
+    {
+        return true;
+    }
+
+    let file_name = Path::new(path)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .map(|value| value.to_ascii_lowercase())
+        .unwrap_or_default();
+
+    if file_name.starts_with(".env") {
+        return true;
+    }
+    if matches!(
+        file_name.as_str(),
+        ".gitignore"
+            | ".gitattributes"
+            | ".gitmodules"
+            | ".editorconfig"
+            | ".npmrc"
+            | ".yarnrc"
+            | ".yarnrc.yml"
+            | ".pypirc"
+            | ".netrc"
+            | "package.json"
+            | "package-lock.json"
+            | "pnpm-lock.yaml"
+            | "yarn.lock"
+            | "bun.lockb"
+            | "tsup.config.ts"
+            | "tsconfig.json"
+            | "tsconfig.base.json"
+            | "tsconfig.build.json"
+            | "vitest.config.ts"
+            | "jsconfig.json"
+            | "id_rsa"
+            | "id_ed25519"
+    ) {
+        return true;
+    }
+
+    lower.ends_with(".pem")
+        || lower.ends_with(".key")
+        || lower.ends_with(".p12")
+        || lower.ends_with(".pfx")
+}
+
 fn estimate_tokens(text: &str) -> usize {
     (text.chars().count() / 4).saturating_add(1)
 }
@@ -254,7 +395,13 @@ pub fn scan_repository(root: &Path, config: &RepoScanConfig) -> Result<ScanResul
                 path: path.display().to_string(),
             })?;
         let normalized = normalize_path(relative);
-        if is_ignored(&normalized, &local_ignores) {
+        if !config.include.is_empty() && !path_matches_any(&normalized, &config.include) {
+            continue;
+        }
+        if path_matches_any(&normalized, &config.exclude) {
+            continue;
+        }
+        if is_ignored(&normalized, &local_ignores) || is_excluded_from_auto_review(&normalized) {
             continue;
         }
 
@@ -548,4 +695,100 @@ fn git_diff_patch_for_file(
         return Ok(None);
     }
     Ok(Some(trimmed.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{scan_repository, RepoScanConfig};
+    use std::fs;
+    use tempfile::TempDir;
+
+    #[test]
+    fn scan_excludes_meta_and_sensitive_files_from_auto_review() {
+        let temp = TempDir::new().expect("tempdir");
+        fs::create_dir_all(temp.path().join("src")).expect("mkdir src");
+        fs::create_dir_all(temp.path().join(".github").join("workflows")).expect("mkdir github");
+        fs::create_dir_all(temp.path().join(".reviva")).expect("mkdir reviva");
+        fs::create_dir_all(temp.path().join("node_modules").join("pkg")).expect("mkdir node");
+        fs::write(temp.path().join("src/main.rs"), "fn main() {}\n").expect("write src");
+        fs::write(temp.path().join(".env"), "SECRET=1\n").expect("write env");
+        fs::write(temp.path().join(".gitignore"), "target/\n").expect("write gitignore");
+        fs::write(temp.path().join("package.json"), "{\"name\":\"x\"}\n").expect("write pkg");
+        fs::write(temp.path().join("package-lock.json"), "{}\n").expect("write pkg lock");
+        fs::write(temp.path().join("tsup.config.ts"), "export default {};\n").expect("write tsup");
+        fs::write(temp.path().join("tsconfig.json"), "{}\n").expect("write tsconfig");
+        fs::write(temp.path().join("vitest.config.ts"), "export default {};\n")
+            .expect("write vitest");
+        fs::write(temp.path().join(".github/workflows/ci.yml"), "name: ci\n")
+            .expect("write workflow");
+        fs::write(
+            temp.path().join(".reviva/config.toml"),
+            "backend_url = \"x\"\n",
+        )
+        .expect("write reviva");
+        fs::write(
+            temp.path().join("node_modules/pkg/index.js"),
+            "module.exports = {}\n",
+        )
+        .expect("write node module");
+        fs::write(temp.path().join("server.key"), "PRIVATE-KEY\n").expect("write key");
+
+        let result = scan_repository(temp.path(), &RepoScanConfig::default()).expect("scan");
+        let paths = result
+            .entries
+            .into_iter()
+            .map(|entry| entry.path)
+            .collect::<Vec<_>>();
+
+        assert!(paths.contains(&"src/main.rs".to_string()));
+        assert!(!paths.contains(&".env".to_string()));
+        assert!(!paths.contains(&".gitignore".to_string()));
+        assert!(!paths.contains(&"package.json".to_string()));
+        assert!(!paths.contains(&"package-lock.json".to_string()));
+        assert!(!paths.contains(&"tsup.config.ts".to_string()));
+        assert!(!paths.contains(&"tsconfig.json".to_string()));
+        assert!(!paths.contains(&"vitest.config.ts".to_string()));
+        assert!(!paths.contains(&".github/workflows/ci.yml".to_string()));
+        assert!(!paths.contains(&".reviva/config.toml".to_string()));
+        assert!(!paths.contains(&"node_modules/pkg/index.js".to_string()));
+        assert!(!paths.contains(&"server.key".to_string()));
+    }
+
+    #[test]
+    fn scan_honors_include_and_exclude_patterns() {
+        let temp = TempDir::new().expect("tempdir");
+        fs::create_dir_all(temp.path().join("src/gen")).expect("mkdir src");
+        fs::create_dir_all(temp.path().join("tests")).expect("mkdir tests");
+        fs::write(temp.path().join("src/main.ts"), "export const ok = 1;\n").expect("main ts");
+        fs::write(
+            temp.path().join("src/gen/tmp.ts"),
+            "export const tmp = 1;\n",
+        )
+        .expect("tmp ts");
+        fs::write(
+            temp.path().join("tests/main.test.ts"),
+            "it('ok', () => {});\n",
+        )
+        .expect("test ts");
+
+        let result = scan_repository(
+            temp.path(),
+            &RepoScanConfig {
+                max_file_bytes: 256 * 1024,
+                include_extensions: None,
+                include: vec!["src/**/*".to_string()],
+                exclude: vec!["src/gen/**/*".to_string()],
+            },
+        )
+        .expect("scan");
+        let paths = result
+            .entries
+            .into_iter()
+            .map(|entry| entry.path)
+            .collect::<Vec<_>>();
+
+        assert!(paths.contains(&"src/main.ts".to_string()));
+        assert!(!paths.contains(&"src/gen/tmp.ts".to_string()));
+        assert!(!paths.contains(&"tests/main.test.ts".to_string()));
+    }
 }

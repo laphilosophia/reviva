@@ -37,6 +37,8 @@ fn extension_filter_and_heuristic_are_deterministic() {
     let config = RepoScanConfig {
         max_file_bytes: 1_000_000,
         include_extensions: Some(vec!["rs".to_string()]),
+        include: Vec::new(),
+        exclude: Vec::new(),
     };
     let first = scan_repository(temp.path(), &config).expect("scan1");
     let second = scan_repository(temp.path(), &config).expect("scan2");
@@ -60,6 +62,8 @@ fn oversized_target_triggers_file_level_refusal() {
         &RepoScanConfig {
             max_file_bytes: 128,
             include_extensions: None,
+            include: Vec::new(),
+            exclude: Vec::new(),
         },
     );
     match result.expect_err("must refuse oversized file") {

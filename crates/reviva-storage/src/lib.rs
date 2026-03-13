@@ -26,6 +26,8 @@ pub struct AppConfig {
     pub stop_sequences: Vec<String>,
     pub max_file_bytes: usize,
     pub estimated_prompt_tokens: usize,
+    pub include: Vec<String>,
+    pub exclude: Vec<String>,
 }
 
 impl Default for AppConfig {
@@ -33,7 +35,7 @@ impl Default for AppConfig {
         Self {
             backend_url: "http://127.0.0.1:8080".to_string(),
             model: None,
-            prompt_wrapper: None,
+            prompt_wrapper: Some("chatml".to_string()),
             llama_lifecycle_policy: None,
             llama_kv_cache: None,
             llama_slot_id: None,
@@ -47,6 +49,8 @@ impl Default for AppConfig {
             stop_sequences: Vec::new(),
             max_file_bytes: 256 * 1024,
             estimated_prompt_tokens: 16_000,
+            include: Vec::new(),
+            exclude: Vec::new(),
         }
     }
 }
@@ -83,6 +87,21 @@ pub struct Storage {
     root: PathBuf,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepoMapEntry {
+    pub path: String,
+    pub size_bytes: u64,
+    pub estimated_tokens: usize,
+    pub review_priority_heuristic: u32,
+    pub suspicion: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepoMap {
+    pub generated_at: String,
+    pub entries: Vec<RepoMapEntry>,
+}
+
 impl Storage {
     pub fn new(repository_root: &Path) -> Self {
         Self {
@@ -105,7 +124,30 @@ impl Storage {
             .and_then(|_| fs::create_dir_all(self.root.join("cache")))
             .and_then(|_| fs::create_dir_all(self.root.join("exports")))
             .map_err(|error| StorageError::Io(error.to_string()))?;
+        self.ensure_default_config()?;
         self.ensure_derived_indexes()
+    }
+
+    pub fn config_path(&self) -> PathBuf {
+        self.root.join("config.toml")
+    }
+
+    pub fn save_repo_map(&self, map: &RepoMap) -> Result<PathBuf, StorageError> {
+        self.init()?;
+        let payload = RepoMapDto {
+            generated_at: map.generated_at.clone(),
+            entries: map
+                .entries
+                .iter()
+                .cloned()
+                .map(Into::into)
+                .collect::<Vec<_>>(),
+        };
+        let json = serde_json::to_string_pretty(&payload)
+            .map_err(|error| StorageError::Serialize(error.to_string()))?;
+        let path = self.root.join("repo-map.json");
+        fs::write(&path, json).map_err(|error| StorageError::Io(error.to_string()))?;
+        Ok(path)
     }
 
     pub fn save_config(&self, config: &AppConfig) -> Result<(), StorageError> {
@@ -309,11 +351,22 @@ impl Storage {
         Ok(())
     }
 
+    fn ensure_default_config(&self) -> Result<(), StorageError> {
+        let path = self.config_path();
+        if path.exists() {
+            return Ok(());
+        }
+        let dto = AppConfigDto::from(AppConfig::default());
+        let toml = toml::to_string_pretty(&dto)
+            .map_err(|error| StorageError::Serialize(error.to_string()))?;
+        fs::write(path, toml).map_err(|error| StorageError::Io(error.to_string()))
+    }
+
     fn save_derived_findings_session(&self, session: &Session) -> Result<(), StorageError> {
-        let path = self
-            .root
-            .join("findings")
-            .join(format!("{}.json", session.id));
+        let findings_dir = self.root.join("findings");
+        let session_suffix = session_suffix(&session.id);
+        let target_slug = target_slug_for_filename(&session.selected_target);
+        let path = findings_dir.join(format!("{target_slug}-{session_suffix}.json"));
         let payload = DerivedFindingsSessionDto {
             session_id: session.id.clone(),
             review_mode: session.review_mode.as_str().to_string(),
@@ -328,6 +381,10 @@ impl Storage {
         };
         let json = serde_json::to_string_pretty(&payload)
             .map_err(|error| StorageError::Serialize(error.to_string()))?;
+        let legacy_path = findings_dir.join(format!("{}.json", session.id));
+        if legacy_path.exists() {
+            fs::remove_file(&legacy_path).map_err(|error| StorageError::Io(error.to_string()))?;
+        }
         fs::write(path, json).map_err(|error| StorageError::Io(error.to_string()))
     }
 
@@ -393,6 +450,10 @@ struct AppConfigDto {
     stop_sequences: Vec<String>,
     max_file_bytes: usize,
     estimated_prompt_tokens: usize,
+    #[serde(default)]
+    include: Vec<String>,
+    #[serde(default)]
+    exclude: Vec<String>,
 }
 
 impl From<AppConfig> for AppConfigDto {
@@ -414,6 +475,8 @@ impl From<AppConfig> for AppConfigDto {
             stop_sequences: value.stop_sequences,
             max_file_bytes: value.max_file_bytes,
             estimated_prompt_tokens: value.estimated_prompt_tokens,
+            include: value.include,
+            exclude: value.exclude,
         }
     }
 }
@@ -437,6 +500,8 @@ impl From<AppConfigDto> for AppConfig {
             stop_sequences: value.stop_sequences,
             max_file_bytes: value.max_file_bytes,
             estimated_prompt_tokens: value.estimated_prompt_tokens,
+            include: value.include,
+            exclude: value.exclude,
         }
     }
 }
@@ -741,6 +806,33 @@ struct DerivedFindingsSessionDto {
     findings: Vec<FindingDto>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+struct RepoMapDto {
+    generated_at: String,
+    entries: Vec<RepoMapEntryDto>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct RepoMapEntryDto {
+    path: String,
+    size_bytes: u64,
+    estimated_tokens: usize,
+    review_priority_heuristic: u32,
+    suspicion: Option<String>,
+}
+
+impl From<RepoMapEntry> for RepoMapEntryDto {
+    fn from(value: RepoMapEntry) -> Self {
+        Self {
+            path: value.path,
+            size_bytes: value.size_bytes,
+            estimated_tokens: value.estimated_tokens,
+            review_priority_heuristic: value.review_priority_heuristic,
+            suspicion: value.suspicion,
+        }
+    }
+}
+
 impl From<Finding> for FindingDto {
     fn from(value: Finding) -> Self {
         Self {
@@ -823,5 +915,62 @@ fn parse_normalization_state(value: &str) -> NormalizationState {
         "structured" => NormalizationState::Structured,
         "partial" => NormalizationState::Partial,
         _ => NormalizationState::RawOnly,
+    }
+}
+
+fn session_suffix(session_id: &str) -> &str {
+    session_id.strip_prefix("session-").unwrap_or(session_id)
+}
+
+fn target_slug_for_filename(target: &RevivaTarget) -> String {
+    match target {
+        RevivaTarget::Single(path) => path_file_slug(path),
+        RevivaTarget::Set(paths) => {
+            if let Some(first) = paths.first() {
+                format!("set-{}-{}", paths.len(), path_file_slug(first))
+            } else {
+                "set".to_string()
+            }
+        }
+        RevivaTarget::Boundary(boundary) => format!(
+            "boundary-{}-to-{}",
+            path_file_slug(&boundary.left),
+            path_file_slug(&boundary.right)
+        ),
+    }
+}
+
+fn path_file_slug(path: &str) -> String {
+    let file_name = Path::new(path)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or(path);
+    sanitize_slug(file_name)
+}
+
+fn sanitize_slug(value: &str) -> String {
+    let mut slug = String::new();
+    let mut last_dash = false;
+    for character in value.chars() {
+        let mapped = if character.is_ascii_alphanumeric() {
+            character.to_ascii_lowercase()
+        } else {
+            '-'
+        };
+        if mapped == '-' {
+            if !last_dash {
+                slug.push(mapped);
+                last_dash = true;
+            }
+        } else {
+            slug.push(mapped);
+            last_dash = false;
+        }
+    }
+    let trimmed = slug.trim_matches('-');
+    if trimmed.is_empty() {
+        "target".to_string()
+    } else {
+        trimmed.to_string()
     }
 }

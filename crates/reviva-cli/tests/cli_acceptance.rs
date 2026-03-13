@@ -23,6 +23,75 @@ fn run_cmd(repo: &Path, args: &[&str]) -> String {
 }
 
 #[test]
+fn init_creates_default_config_and_repo_map() {
+    let temp = TempDir::new().expect("tempdir");
+    fs::create_dir_all(temp.path().join("src")).expect("mkdir");
+    fs::write(
+        temp.path().join("src/main.rs"),
+        "fn main() { println!(\"hello\"); }\n",
+    )
+    .expect("write");
+
+    let init_output = run_cmd(
+        temp.path(),
+        &["init", "--repo", temp.path().to_str().expect("repo str")],
+    );
+    assert!(init_output.contains("config: created"));
+    assert!(init_output.contains("repo_map_entries:"));
+
+    let config_path = temp.path().join(".reviva").join("config.toml");
+    let config = fs::read_to_string(config_path).expect("config");
+    assert!(config.contains("backend_url = \"http://127.0.0.1:8080\""));
+    assert!(config.contains("prompt_wrapper = \"chatml\""));
+    assert!(config.contains("max_file_bytes = 262144"));
+
+    let repo_map_path = temp.path().join(".reviva").join("repo-map.json");
+    let repo_map = fs::read_to_string(repo_map_path).expect("repo map");
+    let parsed: Value = serde_json::from_str(&repo_map).expect("valid repo map json");
+    let entries = parsed["entries"].as_array().expect("entries");
+    assert!(
+        !entries.is_empty(),
+        "repo map must include at least one file"
+    );
+    assert!(entries
+        .iter()
+        .any(|entry| entry["path"].as_str() == Some("src/main.rs")));
+
+    let second_init = run_cmd(
+        temp.path(),
+        &[
+            "init",
+            "--repo",
+            temp.path().to_str().expect("repo str"),
+            "--no-scan",
+        ],
+    );
+    assert!(second_init.contains("config: existing"));
+    assert!(second_init.contains("repo_map: skipped (--no-scan)"));
+
+    fs::write(
+        temp.path().join(".reviva").join("config.toml"),
+        "backend_url = \"http://127.0.0.1:8080\"\ntimeout_ms = 60000\nmax_tokens = 2048\ntemperature = 0.1\nstop_sequences = []\nmax_file_bytes = 262144\nestimated_prompt_tokens = 16000\n",
+    )
+    .expect("legacy config");
+    let rewrite_init = run_cmd(
+        temp.path(),
+        &[
+            "init",
+            "--repo",
+            temp.path().to_str().expect("repo str"),
+            "--no-scan",
+            "--rewrite-config",
+        ],
+    );
+    assert!(rewrite_init.contains("config: rewritten"));
+    let rewritten = fs::read_to_string(temp.path().join(".reviva").join("config.toml"))
+        .expect("rewritten config");
+    assert!(rewritten.contains("include = []"));
+    assert!(rewritten.contains("exclude = []"));
+}
+
+#[test]
 fn end_to_end_cli_flow_and_prompt_inspectability() {
     let temp = TempDir::new().expect("tempdir");
     fs::create_dir_all(temp.path().join("src")).expect("mkdir");
@@ -57,6 +126,8 @@ fn end_to_end_cli_flow_and_prompt_inspectability() {
         &["scan", "--repo", temp.path().to_str().expect("repo str")],
     );
     assert!(scan_output.contains("src/main.rs"));
+    assert!(scan_output.contains("repo_map:"));
+    assert!(temp.path().join(".reviva").join("repo-map.json").exists());
 
     let review_output = Command::new(env!("CARGO_BIN_EXE_reviva"))
         .args([
@@ -259,7 +330,7 @@ fn exact_hit_review_cache_skips_second_backend_call() {
 }
 
 #[test]
-fn qwen_chatml_wrapper_keeps_preview_equal_to_sent_prompt() {
+fn chatml_wrapper_keeps_preview_equal_to_sent_prompt() {
     let temp = TempDir::new().expect("tempdir");
     fs::create_dir_all(temp.path().join("src")).expect("mkdir");
     fs::write(
@@ -282,7 +353,7 @@ fn qwen_chatml_wrapper_keeps_preview_equal_to_sent_prompt() {
     fs::write(
         temp.path().join(".reviva/config.toml"),
         format!(
-            "backend_url = \"{}\"\nmodel = \"qwen2.5-coder-7b-instruct\"\nprompt_wrapper = \"qwen-chatml\"\ntimeout_ms = 10000\nmax_tokens = 512\ntemperature = 0.1\nstop_sequences = []\nmax_file_bytes = 262144\nestimated_prompt_tokens = 16000\n",
+            "backend_url = \"{}\"\nmodel = \"test-chatml-model\"\nprompt_wrapper = \"chatml\"\ntimeout_ms = 10000\nmax_tokens = 512\ntemperature = 0.1\nstop_sequences = []\nmax_file_bytes = 262144\nestimated_prompt_tokens = 16000\n",
             server.url("")
         ),
     )
@@ -326,7 +397,7 @@ fn qwen_chatml_wrapper_keeps_preview_equal_to_sent_prompt() {
         .as_array()
         .expect("warnings")
         .iter()
-        .any(|value| value.as_str() == Some("prompt_wrapper=qwen-chatml")));
+        .any(|value| value.as_str() == Some("prompt_wrapper=chatml")));
 }
 
 #[test]

@@ -262,14 +262,14 @@ pub fn parse_review_profile_toml(content: &str) -> Result<ReviewProfileSpec, Rev
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PromptWrapper {
     Plain,
-    QwenChatMl,
+    ChatMl,
 }
 
 impl PromptWrapper {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Plain => "plain",
-            Self::QwenChatMl => "qwen-chatml",
+            Self::ChatMl => "chatml",
         }
     }
 }
@@ -283,7 +283,7 @@ impl fmt::Display for ParsePromptWrapperError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "unsupported prompt wrapper: {} (supported: plain, qwen-chatml)",
+            "unsupported prompt wrapper: {} (supported: plain, chatml)",
             self.value
         )
     }
@@ -294,7 +294,7 @@ impl std::error::Error for ParsePromptWrapperError {}
 pub fn parse_prompt_wrapper(value: &str) -> Result<PromptWrapper, ParsePromptWrapperError> {
     match value.trim().to_ascii_lowercase().as_str() {
         "" | "plain" => Ok(PromptWrapper::Plain),
-        "qwen-chatml" | "qwen_chatml" => Ok(PromptWrapper::QwenChatMl),
+        "chatml" => Ok(PromptWrapper::ChatMl),
         _ => Err(ParsePromptWrapperError {
             value: value.to_string(),
         }),
@@ -304,7 +304,7 @@ pub fn parse_prompt_wrapper(value: &str) -> Result<PromptWrapper, ParsePromptWra
 pub fn apply_prompt_wrapper(prompt: &str, wrapper: PromptWrapper) -> String {
     match wrapper {
         PromptWrapper::Plain => prompt.to_string(),
-        PromptWrapper::QwenChatMl => format!(
+        PromptWrapper::ChatMl => format!(
             "<|im_start|>system\nYou are a constrained code reviewer. Follow the user's output contract exactly.\n<|im_end|>\n<|im_start|>user\n{prompt}\n<|im_end|>\n<|im_start|>assistant\n"
         ),
     }

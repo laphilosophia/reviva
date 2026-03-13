@@ -91,6 +91,12 @@ If you install the binary, command name is `reviva`.
 1. Scan a repo:
 
 ```bash
+reviva init --repo /path/to/repo
+```
+
+1. Scan a repo:
+
+```bash
 reviva scan --repo /path/to/repo
 ```
 
@@ -118,11 +124,15 @@ reviva export --repo /path/to/repo --session <SESSION_ID> --format md
 reviva export --repo /path/to/repo --session <SESSION_ID> --format json
 ```
 
+Default export filename uses target slug + session suffix, for example:
+- `lib-rs-1773362000000.json`
+
 ## CLI Surface
 
 ```text
+reviva init [--repo PATH] [--no-scan] [--rewrite-config]
 reviva scan [--repo PATH]
-reviva review --repo PATH [--mode MODE] [--profile NAME] [--profile-file PATH] [--max-findings N] [--max-output-tokens N] [--file PATH]... [--boundary-left PATH --boundary-right PATH] [--incremental-from GIT_REF] [--note TEXT] [--prompt-wrapper plain|qwen-chatml] [--kv-cache on|off] [--kv-slot SLOT_ID] [--llama-lifecycle manual|ensure-running|ensure-running-and-stop] [--preview-only] [--llama-model-path PATH_OR_DIR] [--llama-server-path PATH]
+reviva review --repo PATH [--mode MODE] [--profile NAME] [--profile-file PATH] [--max-findings N] [--max-output-tokens N] [--file PATH]... [--boundary-left PATH --boundary-right PATH] [--incremental-from GIT_REF] [--note TEXT] [--prompt-wrapper plain|chatml] [--kv-cache on|off] [--kv-slot SLOT_ID] [--llama-lifecycle manual|ensure-running|ensure-running-and-stop] [--preview-only] [--llama-model-path PATH_OR_DIR] [--llama-server-path PATH]
 reviva set save --repo PATH --name NAME --file PATH...
 reviva set load --repo PATH --name NAME
 reviva set list --repo PATH
@@ -134,14 +144,16 @@ reviva export --repo PATH --session SESSION_ID [--format md|json] [--output PATH
 
 ## Configuration
 
-Reviva reads `.reviva/config.toml` from the target repository root.
+`reviva init` creates `.reviva/` and writes default `config.toml` if missing.
+Use `reviva init --rewrite-config` to reserialize existing config and materialize new default fields.
+All commands read `.reviva/config.toml` from the target repository root.
 
 Example:
 
 ```toml
 backend_url = "http://127.0.0.1:8080"
 model = "local-model-name"
-prompt_wrapper = "plain"
+prompt_wrapper = "chatml"
 llama_lifecycle_policy = "ensure-running-and-stop"
 llama_kv_cache = true
 llama_slot_id = 0
@@ -153,18 +165,22 @@ temperature = 0.1
 stop_sequences = []
 max_file_bytes = 262144
 estimated_prompt_tokens = 16000
+include = [] # optional glob-like patterns, ex: ["src/*", "crates/*/src/*"]
+exclude = [] # optional glob-like patterns, ex: ["src/generated/*", "**/*.snap"]
 ```
 
 Notes:
 
-- `prompt_wrapper` defaults to `plain` if omitted.
-- Use `qwen-chatml` only for backends/models that expect ChatML-style prompting.
+- `prompt_wrapper` defaults to `chatml` if omitted.
+- Use `plain` only as an explicit opt-in fallback when your backend expects raw prompt text.
 - `mode` is optional; if omitted, Reviva derives it from profile name/focus then falls back to `contract`.
 - `--max-findings` and `--max-output-tokens` override profile limits for the current run only.
 - `llama_lifecycle_policy` defaults to `ensure-running-and-stop` if omitted.
 - `llama_kv_cache` defaults to `false` if omitted.
 - `llama_slot_id` is optional; set it to pin repeated reviews to a stable llama-server slot.
 - `max_file_bytes` and `estimated_prompt_tokens` are conservative defaults, not hard domain invariants.
+- when `include` is non-empty, scan/map keeps only matching paths.
+- `exclude` removes matching paths from scan/map.
 
 ## Target Selection Behavior
 
@@ -204,6 +220,7 @@ Reviva persists data under:
 ```text
 .reviva/
   config.toml
+  repo-map.json
   sessions/
   findings/
   sets/
@@ -212,6 +229,8 @@ Reviva persists data under:
 
 Session is the canonical truth source. Raw backend response is always preserved.
 `findings/` and `sets/` also keep derived index surfaces for quick inspection (`index.json`), while canonical state remains in sessions.
+`repo-map.json` is a scan snapshot (path, size, estimated tokens, review priority heuristic, suspicion) written by `reviva init` and refreshed on each `reviva scan`.
+Auto scan/map excludes non-reviewable and sensitive files (for example `.git/`, `.github/`, `.reviva/`, `node_modules/`, `.env*`, lockfiles, and common key/cert extensions).
 
 Reviva also keeps a derived local review cache (`.reviva/cache/review-cache.json`) keyed by prompt+backend identity:
 
@@ -230,6 +249,8 @@ Exports now keep prompt/body readability by default:
 
 - Markdown export shows prompt metadata (hash/line/char counts) instead of dumping full prompt text.
 - JSON export includes prompt metadata and parsed response shape, while full prompt/raw bodies stay in canonical session JSON.
+- Derived findings files also use target slug + session suffix by default (example: `lib-rs-1773362000000.json`).
+- Canonical sessions remain `session-*.json` under `.reviva/sessions/` for stable `session show --id` behavior.
 
 Profile TOML supports optional limits:
 

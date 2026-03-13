@@ -80,6 +80,8 @@ fn roundtrip_session_config_and_set() {
     );
     assert_eq!(config.llama_kv_cache, loaded_config.llama_kv_cache);
     assert_eq!(config.llama_slot_id, loaded_config.llama_slot_id);
+    assert_eq!(config.include, loaded_config.include);
+    assert_eq!(config.exclude, loaded_config.exclude);
 
     let session = fixture_session();
     storage.save_session(&session).expect("save session");
@@ -92,7 +94,7 @@ fn roundtrip_session_config_and_set() {
     assert!(storage
         .root()
         .join("findings")
-        .join("session-1.json")
+        .join("main-rs-1.json")
         .exists());
     assert!(storage.root().join("findings").join("index.json").exists());
 

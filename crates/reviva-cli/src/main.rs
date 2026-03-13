@@ -13,7 +13,7 @@ use reviva_repo::{
     estimated_target_tokens, load_incremental_target_files, load_target_files,
     resolve_incremental_target, scan_repository, RepoScanConfig,
 };
-use reviva_storage::{AppConfig, Storage};
+use reviva_storage::{AppConfig, RepoMap, RepoMapEntry, Storage};
 use std::collections::BTreeMap;
 use std::env;
 use std::fs;
@@ -39,6 +39,7 @@ fn run() -> Result<(), String> {
     }
 
     match args[1].as_str() {
+        "init" => cmd_init(&args[2..]),
         "scan" => cmd_scan(&args[2..]),
         "review" => cmd_review(&args[2..]),
         "set" => cmd_set(&args[2..]),
@@ -52,16 +53,92 @@ fn run() -> Result<(), String> {
     }
 }
 
+fn cmd_init(args: &[String]) -> Result<(), String> {
+    let repo = parse_repo_arg(args)?;
+    let storage = Storage::new(&repo);
+    let rewrite_config = has_flag(args, "--rewrite-config");
+    let config_preexisting = storage.config_path().exists();
+    storage.init().map_err(|error| error.to_string())?;
+    if rewrite_config {
+        let config = storage.load_config().map_err(|error| error.to_string())?;
+        storage
+            .save_config(&config)
+            .map_err(|error| error.to_string())?;
+    }
+
+    println!("reviva_root: {}", storage.root().display());
+    let config_state = if rewrite_config {
+        if config_preexisting {
+            "rewritten"
+        } else {
+            "created+rewritten"
+        }
+    } else if config_preexisting {
+        "existing"
+    } else {
+        "created"
+    };
+    println!("config: {config_state}");
+
+    if has_flag(args, "--no-scan") {
+        println!("repo_map: skipped (--no-scan)");
+        return Ok(());
+    }
+
+    let config = storage.load_config().map_err(|error| error.to_string())?;
+    let repo_config = repo_scan_config_from_app_config(&config);
+    let scan = scan_repository(&repo, &repo_config).map_err(|error| error.to_string())?;
+    let entries = scan
+        .entries
+        .into_iter()
+        .map(|entry| RepoMapEntry {
+            path: entry.path,
+            size_bytes: entry.size_bytes,
+            estimated_tokens: entry.estimated_tokens,
+            review_priority_heuristic: entry.review_priority_heuristic,
+            suspicion: entry.suspicion.map(|value| value.as_str().to_string()),
+        })
+        .collect::<Vec<_>>();
+    let entry_count = entries.len();
+    let repo_map = RepoMap {
+        generated_at: current_timestamp(),
+        entries,
+    };
+    let path = storage
+        .save_repo_map(&repo_map)
+        .map_err(|error| error.to_string())?;
+    println!("repo_map: {}", path.display());
+    println!("repo_map_entries: {entry_count}");
+    Ok(())
+}
+
 fn cmd_scan(args: &[String]) -> Result<(), String> {
     let repo = parse_repo_arg(args)?;
     let storage = Storage::new(&repo);
     storage.init().map_err(|error| error.to_string())?;
     let config = storage.load_config().map_err(|error| error.to_string())?;
-    let repo_config = RepoScanConfig {
-        max_file_bytes: config.max_file_bytes,
-        include_extensions: None,
-    };
+    let repo_config = repo_scan_config_from_app_config(&config);
     let result = scan_repository(&repo, &repo_config).map_err(|error| error.to_string())?;
+    let repo_map = RepoMap {
+        generated_at: current_timestamp(),
+        entries: result
+            .entries
+            .iter()
+            .map(|entry| RepoMapEntry {
+                path: entry.path.clone(),
+                size_bytes: entry.size_bytes,
+                estimated_tokens: entry.estimated_tokens,
+                review_priority_heuristic: entry.review_priority_heuristic,
+                suspicion: entry
+                    .suspicion
+                    .as_ref()
+                    .map(|value| value.as_str().to_string()),
+            })
+            .collect(),
+    };
+    let repo_map_path = storage
+        .save_repo_map(&repo_map)
+        .map_err(|error| error.to_string())?;
     for entry in result.entries {
         let suspicion = entry
             .suspicion
@@ -77,6 +154,7 @@ fn cmd_scan(args: &[String]) -> Result<(), String> {
             suspicion
         );
     }
+    println!("repo_map: {}", repo_map_path.display());
     Ok(())
 }
 
@@ -116,6 +194,7 @@ fn cmd_review(args: &[String]) -> Result<(), String> {
     if let Some(value) = prompt_wrapper_arg {
         let parsed = parse_prompt_wrapper(&value).map_err(|error| error.to_string())?;
         config.prompt_wrapper = Some(parsed.as_str().to_string());
+        config_updated = true;
     }
     if let Some(value) = kv_cache_arg {
         config.llama_kv_cache = Some(parse_kv_cache_flag(&value)?);
@@ -158,10 +237,7 @@ fn cmd_review(args: &[String]) -> Result<(), String> {
     }
     resolved_profile.hash = fnv1a64_hex(&resolved_profile.spec.canonical_text());
     let (mode, mode_source) = resolve_review_mode(mode_arg.as_deref(), &resolved_profile.spec)?;
-    let repo_config = RepoScanConfig {
-        max_file_bytes: config.max_file_bytes,
-        include_extensions: None,
-    };
+    let repo_config = repo_scan_config_from_app_config(&config);
     let incremental_context_lines = 3_usize;
     let target = resolve_target(
         &repo,
@@ -625,10 +701,11 @@ fn cmd_export(args: &[String]) -> Result<(), String> {
     let path = if let Some(output) = output {
         PathBuf::from(output)
     } else {
+        let extension = if format == "json" { "json" } else { "md" };
         storage.root().join("exports").join(format!(
             "{}.{}",
-            session_id,
-            if format == "json" { "json" } else { "md" }
+            default_output_stem(&session),
+            extension
         ))
     };
     if let Some(parent) = path.parent() {
@@ -685,10 +762,7 @@ fn interactive_target_selection(repo: &Path, args: &[String]) -> Result<RevivaTa
     let config = storage
         .load_config()
         .unwrap_or_else(|_| AppConfig::default());
-    let repo_config = RepoScanConfig {
-        max_file_bytes: config.max_file_bytes,
-        include_extensions: None,
-    };
+    let repo_config = repo_scan_config_from_app_config(&config);
     let scan = scan_repository(repo, &repo_config).map_err(|error| error.to_string())?;
     if scan.entries.is_empty() {
         return Err("scan returned no reviewable files".to_string());
@@ -1250,7 +1324,16 @@ fn resolve_review_mode(
 fn resolve_prompt_wrapper(value: Option<&str>) -> Result<PromptWrapper, String> {
     match value {
         Some(raw) => parse_prompt_wrapper(raw).map_err(|error| error.to_string()),
-        None => Ok(PromptWrapper::Plain),
+        None => Ok(PromptWrapper::ChatMl),
+    }
+}
+
+fn repo_scan_config_from_app_config(config: &AppConfig) -> RepoScanConfig {
+    RepoScanConfig {
+        max_file_bytes: config.max_file_bytes,
+        include_extensions: None,
+        include: config.include.clone(),
+        exclude: config.exclude.clone(),
     }
 }
 
@@ -1421,6 +1504,65 @@ fn build_review_cache_key(request: &RevivaRequest) -> String {
 
 fn normalize_path_for_session(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
+}
+
+fn default_output_stem(session: &Session) -> String {
+    let target_slug = target_slug_for_filename(&session.selected_target);
+    let session_suffix = session.id.strip_prefix("session-").unwrap_or(&session.id);
+    format!("{target_slug}-{session_suffix}")
+}
+
+fn target_slug_for_filename(target: &RevivaTarget) -> String {
+    match target {
+        RevivaTarget::Single(path) => path_file_slug(path),
+        RevivaTarget::Set(paths) => {
+            if let Some(first) = paths.first() {
+                format!("set-{}-{}", paths.len(), path_file_slug(first))
+            } else {
+                "set".to_string()
+            }
+        }
+        RevivaTarget::Boundary(boundary) => format!(
+            "boundary-{}-to-{}",
+            path_file_slug(&boundary.left),
+            path_file_slug(&boundary.right)
+        ),
+    }
+}
+
+fn path_file_slug(path: &str) -> String {
+    let file_name = Path::new(path)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or(path);
+    sanitize_slug(file_name)
+}
+
+fn sanitize_slug(value: &str) -> String {
+    let mut slug = String::new();
+    let mut last_dash = false;
+    for character in value.chars() {
+        let mapped = if character.is_ascii_alphanumeric() {
+            character.to_ascii_lowercase()
+        } else {
+            '-'
+        };
+        if mapped == '-' {
+            if !last_dash {
+                slug.push(mapped);
+                last_dash = true;
+            }
+        } else {
+            slug.push(mapped);
+            last_dash = false;
+        }
+    }
+    let trimmed = slug.trim_matches('-');
+    if trimmed.is_empty() {
+        "target".to_string()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 fn parse_required_arg(args: &[String], flag: &str) -> Result<String, String> {
@@ -1751,8 +1893,9 @@ fn warning_value<'a>(warning: &'a str, prefix: &str) -> Option<&'a str> {
 }
 
 fn print_usage() {
+    println!("reviva init [--repo PATH] [--no-scan] [--rewrite-config]");
     println!("reviva scan [--repo PATH]");
-    println!("reviva review --repo PATH [--mode MODE] [--profile NAME] [--profile-file PATH] [--max-findings N] [--max-output-tokens N] [--file PATH]... [--boundary-left PATH --boundary-right PATH] [--incremental-from GIT_REF] [--note TEXT] [--prompt-wrapper plain|qwen-chatml] [--kv-cache on|off] [--kv-slot SLOT_ID] [--llama-lifecycle manual|ensure-running|ensure-running-and-stop] [--preview-only] [--llama-model-path PATH_OR_DIR] [--llama-server-path PATH]");
+    println!("reviva review --repo PATH [--mode MODE] [--profile NAME] [--profile-file PATH] [--max-findings N] [--max-output-tokens N] [--file PATH]... [--boundary-left PATH --boundary-right PATH] [--incremental-from GIT_REF] [--note TEXT] [--prompt-wrapper plain|chatml] [--kv-cache on|off] [--kv-slot SLOT_ID] [--llama-lifecycle manual|ensure-running|ensure-running-and-stop] [--preview-only] [--llama-model-path PATH_OR_DIR] [--llama-server-path PATH]");
     println!("reviva set save --repo PATH --name NAME --file PATH...");
     println!("reviva set load --repo PATH --name NAME");
     println!("reviva set list --repo PATH");

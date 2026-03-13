@@ -353,9 +353,14 @@ FINDINGS:
 }
 
 #[test]
-fn prompt_wrapper_qwen_chatml_is_parseable_and_stable() {
-    let wrapper = parse_prompt_wrapper("qwen-chatml").expect("valid wrapper");
-    assert_eq!(wrapper, PromptWrapper::QwenChatMl);
+fn prompt_wrapper_chatml_is_parseable_and_stable() {
+    let wrapper = parse_prompt_wrapper("chatml").expect("valid wrapper");
+    assert_eq!(wrapper, PromptWrapper::ChatMl);
+
+    let alias_removed = parse_prompt_wrapper("chatml-v2").expect_err("unsupported alias removed");
+    assert!(alias_removed
+        .to_string()
+        .contains("supported: plain, chatml"));
 
     let wrapped = apply_prompt_wrapper("REVIVA REVIEW REQUEST", wrapper);
     assert!(wrapped.contains("<|im_start|>system"));
