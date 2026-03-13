@@ -1,0 +1,34 @@
+name: Feature request
+description: Suggest an improvement aligned with Reviva scope
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem statement
+      description: What problem are you trying to solve?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: Keep proposal explicit and scope-bounded
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope check
+      options:
+        - label: This does not introduce autonomous/agent behavior by default
+          required: false
+        - label: This keeps prompt/review flow inspectable
+          required: false
