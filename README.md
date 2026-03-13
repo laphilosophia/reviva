@@ -8,7 +8,7 @@
 
 ![LICENSE](https://img.shields.io/badge/license-Apache--2.0-1f6feb?style=flat-square)
 ![Rust](https://img.shields.io/badge/rust-stable-D34516?style=flat-square)
-[![Crates.io](https://img.shields.io/badge/crates-online-61784D?style=flat-square)](https://crates.io/users/laphilosophia)
+[![Crates.io](https://img.shields.io/badge/crates-online-61784D?style=flat-square)](https://crates.io/crates/reviva)
 ![Interface](https://img.shields.io/badge/interface-CLI-0f766e?style=flat-square)
 ![Inference](https://img.shields.io/badge/inference-local--first-0ea5e9?style=flat-square)
 
@@ -67,7 +67,15 @@ REVIVA_VERSION=v0.1.0 curl -fsSL https://raw.githubusercontent.com/laphilosophia
 $env:REVIVA_VERSION = "v0.1.0"; iwr https://raw.githubusercontent.com/laphilosophia/reviva/main/scripts/install/install.ps1 -UseBasicParsing | iex
 ```
 
-### Option B: Build From Source
+### Option B: Install via Cargo
+
+Requires Rust toolchain.
+
+```bash
+cargo install reviva
+```
+
+### Option C: Build From Source
 
 1. Install Rust (stable toolchain).
 2. Build:
@@ -267,3 +275,5 @@ cargo fmt
 ## License
 
 Apache-2.0
+
+
