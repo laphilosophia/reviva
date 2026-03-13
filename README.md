@@ -1,15 +1,26 @@
 # Reviva
 
+> Deterministic local review appliance: explicit target -> explicit prompt -> explicit artifacts.
+
+![cover](docs/assets/reviva-cover.svg)
+
+[CLI References](./docs/cli-reference.md) | [Config References](./docs/config-reference.md)
+
+![LICENSE](https://img.shields.io/badge/license-Apache--2.0-1f6feb?style=flat-square)
+![Rust](https://img.shields.io/badge/rust-stable-f74c00?style=flat-square)
+![Interface](https://img.shields.io/badge/interface-CLI-0f766e?style=flat-square)
+![Inference](https://img.shields.io/badge/rust-stable-f74c00?style=flat-square)
+
 Reviva is a local-first review terminal for deterministic, inspectable, and constrained repository analysis with local LLM backends.
 
 Reviva is intentionally narrow:
 
-- scan repository files
-- select an explicit review target
-- build a visible prompt for a specific review mode
-- send to a local completion backend
-- preserve raw response
-- persist findings and session artifacts
+- Scan repository files
+- Select an explicit review target
+- Build a visible prompt for a specific review mode
+- Send to a local completion backend
+- Preserve raw response
+- Persist findings and session artifacts
 
 It is not a chatbot, IDE copilot, or autonomous coding agent.
 
@@ -20,12 +31,12 @@ Reviva keeps the full review path explicit and auditable.
 
 Core principles:
 
-- local-first behavior
-- explicit prompt preview
-- explicit backend URL/model
-- deterministic target selection
-- plain error reporting
-- human-inspectable storage
+- Local-first behavior
+- Explicit prompt preview
+- Explicit backend URL/model
+- Deterministic target selection
+- Plain error reporting
+- Human-inspectable storage
 
 ## Install
 
@@ -36,7 +47,7 @@ Core principles:
 cargo build
 ```
 
-3. Run from workspace:
+1. Run from workspace:
 
 ```bash
 cargo run -p reviva-cli -- --help
@@ -52,13 +63,13 @@ If installed as a binary, command name is `reviva`.
 reviva init --repo /path/to/repo
 ```
 
-2. Scan reviewable files:
+1. Scan reviewable files:
 
 ```bash
 reviva scan --repo /path/to/repo
 ```
 
-3. Run a focused review:
+1. Run a focused review:
 
 ```bash
 reviva review \
@@ -67,7 +78,7 @@ reviva review \
   --file src/main.rs
 ```
 
-4. Inspect results:
+1. Inspect results:
 
 ```bash
 reviva session list --repo /path/to/repo
@@ -75,7 +86,7 @@ reviva session show --repo /path/to/repo --id <SESSION_ID>
 reviva findings list --repo /path/to/repo --session <SESSION_ID>
 ```
 
-5. Export report:
+1. Export report:
 
 ```bash
 reviva export --repo /path/to/repo --session <SESSION_ID> --format md
