@@ -35,6 +35,6 @@ models/
 lm-models/
 
 # Internals
-/docs/
+/internal/
 AGENTS.md
 .reviva

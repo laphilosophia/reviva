@@ -155,3 +155,84 @@ fn review_cache_session_link_roundtrip() {
         .expect("load missing");
     assert_eq!(missing, None);
 }
+
+#[test]
+fn config_reference_table_stays_in_sync_with_app_config_fields() {
+    use std::collections::BTreeSet;
+
+    let docs = include_str!("../../../docs/config-reference.md");
+    let mut fields = Vec::<String>::new();
+    let mut in_table = false;
+
+    for line in docs.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("| Field | Type |") {
+            in_table = true;
+            continue;
+        }
+        if !in_table {
+            continue;
+        }
+        if trimmed.is_empty() || !trimmed.starts_with('|') {
+            break;
+        }
+        if trimmed.starts_with("|---") {
+            continue;
+        }
+        let columns = trimmed.split('|').map(str::trim).collect::<Vec<_>>();
+        if columns.len() < 3 {
+            continue;
+        }
+        let field = columns[1];
+        if let Some(name) = field
+            .strip_prefix('`')
+            .and_then(|value| value.strip_suffix('`'))
+        {
+            fields.push(name.to_string());
+        }
+    }
+
+    assert!(
+        !fields.is_empty(),
+        "docs/config-reference.md must include the config field table"
+    );
+
+    let documented = fields.into_iter().collect::<BTreeSet<_>>();
+    let expected = [
+        "backend_url",
+        "model",
+        "prompt_wrapper",
+        "llama_lifecycle_policy",
+        "llama_kv_cache",
+        "llama_slot_id",
+        "review_profile",
+        "review_profile_file",
+        "llama_server_path",
+        "llama_model_path",
+        "timeout_ms",
+        "max_tokens",
+        "temperature",
+        "stop_sequences",
+        "max_file_bytes",
+        "estimated_prompt_tokens",
+        "include",
+        "exclude",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect::<BTreeSet<_>>();
+
+    if documented != expected {
+        let missing = expected
+            .difference(&documented)
+            .cloned()
+            .collect::<Vec<_>>();
+        let extra = documented
+            .difference(&expected)
+            .cloned()
+            .collect::<Vec<_>>();
+        panic!(
+            "docs/config-reference.md field drift detected; missing={missing:?}, extra={extra:?}"
+        );
+    }
+}

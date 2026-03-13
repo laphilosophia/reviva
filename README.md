@@ -2,20 +2,21 @@
 
 Reviva is a local-first review terminal for deterministic, inspectable, and constrained repository analysis with local LLM backends.
 
-It is intentionally narrow:
+Reviva is intentionally narrow:
 
 - scan repository files
 - select an explicit review target
 - build a visible prompt for a specific review mode
 - send to a local completion backend
 - preserve raw response
-- persist normalized findings and session artifacts
+- persist findings and session artifacts
 
 It is not a chatbot, IDE copilot, or autonomous coding agent.
 
 ## Why Reviva
 
-Many local review flows become opaque once hidden prompt templates, chat abstractions, and agent loops are introduced. Reviva keeps the review path explicit and auditable.
+Most local review flows become opaque once hidden prompt templates and agent loops are introduced.
+Reviva keeps the full review path explicit and auditable.
 
 Core principles:
 
@@ -26,17 +27,67 @@ Core principles:
 - plain error reporting
 - human-inspectable storage
 
-## What You Can Do
+## Install
 
-- `scan` a repo with conservative filtering
-- `review` a file, file set, or boundary pair
-- use built-in or file-based review profiles
-- inspect prompt before execution
-- reuse exact prompt/backend hits via local review cache
-- list and inspect sessions/findings
-- export session output to Markdown or JSON
+1. Install Rust (stable toolchain).
+2. Build Reviva:
 
-Supported review modes:
+```bash
+cargo build
+```
+
+3. Run from workspace:
+
+```bash
+cargo run -p reviva-cli -- --help
+```
+
+If installed as a binary, command name is `reviva`.
+
+## Quick Start
+
+1. Initialize Reviva metadata in a repository:
+
+```bash
+reviva init --repo /path/to/repo
+```
+
+2. Scan reviewable files:
+
+```bash
+reviva scan --repo /path/to/repo
+```
+
+3. Run a focused review:
+
+```bash
+reviva review \
+  --repo /path/to/repo \
+  --mode launch-readiness \
+  --file src/main.rs
+```
+
+4. Inspect results:
+
+```bash
+reviva session list --repo /path/to/repo
+reviva session show --repo /path/to/repo --id <SESSION_ID>
+reviva findings list --repo /path/to/repo --session <SESSION_ID>
+```
+
+5. Export report:
+
+```bash
+reviva export --repo /path/to/repo --session <SESSION_ID> --format md
+```
+
+## Core Concepts
+
+### Review Mode
+
+Mode is the coarse review lens.
+
+Built-in modes:
 
 ```text
 contract
@@ -50,233 +101,118 @@ launch-readiness
 maintainability
 ```
 
-## Mode vs Profile
+Mode resolution order:
 
-Reviva separates two concepts:
-
-- `mode`: coarse review lens (contract, boundary, launch-readiness, etc.)
-- `profile`: review policy (rules, vocabulary, confidence/severity scales, risk classes)
-
-`mode` is optional. Resolution order:
-
-1. `--mode` (explicit)
+1. `--mode`
 2. profile name if it matches a mode
 3. first profile focus token that matches a mode
 4. fallback: `contract`
 
-This keeps fast presets available while allowing profile-driven control.
+### Review Profile
 
-## Requirements
+Profile is the policy layer: severity/confidence vocabulary, risk classes, optional output limits.
 
-- Rust toolchain (stable)
-- local inference backend reachable via HTTP completion endpoint
-- optional: `llama-server` in `PATH` for local auto-start flow
+You can use:
 
-## Build
+- built-in profiles (`--profile NAME`)
+- file-based profiles (`--profile-file PATH`)
 
-```bash
-cargo build
-```
+### Prompt Wrapper
 
-Run directly from workspace:
+`prompt_wrapper` controls how Reviva packages the prompt before sending it to backend.
 
-```bash
-cargo run -p reviva-cli -- --help
-```
+- `chatml` (default): wraps prompt in ChatML system/user blocks.
+- `plain`: sends raw prompt text as-is.
 
-If you install the binary, command name is `reviva`.
+Use `plain` only if your backend/model expects plain completion prompts.
 
-## Quick Start
-
-1. Scan a repo:
-
-```bash
-reviva init --repo /path/to/repo
-```
-
-1. Scan a repo:
-
-```bash
-reviva scan --repo /path/to/repo
-```
-
-1. Run a focused review:
-
-```bash
-reviva review \
-  --repo /path/to/repo \
-  --mode launch-readiness \
-  --file src/main.rs
-```
-
-1. Inspect results:
-
-```bash
-reviva session list --repo /path/to/repo
-reviva session show --repo /path/to/repo --id <SESSION_ID>
-reviva findings list --repo /path/to/repo --session <SESSION_ID>
-```
-
-1. Export:
-
-```bash
-reviva export --repo /path/to/repo --session <SESSION_ID> --format md
-reviva export --repo /path/to/repo --session <SESSION_ID> --format json
-```
-
-Default export filename uses target slug + session suffix, for example:
-- `lib-rs-1773362000000.json`
-
-## CLI Surface
-
-```text
-reviva init [--repo PATH] [--no-scan] [--rewrite-config]
-reviva scan [--repo PATH]
-reviva review --repo PATH [--mode MODE] [--profile NAME] [--profile-file PATH] [--max-findings N] [--max-output-tokens N] [--file PATH]... [--boundary-left PATH --boundary-right PATH] [--incremental-from GIT_REF] [--note TEXT] [--prompt-wrapper plain|chatml] [--kv-cache on|off] [--kv-slot SLOT_ID] [--llama-lifecycle manual|ensure-running|ensure-running-and-stop] [--preview-only] [--llama-model-path PATH_OR_DIR] [--llama-server-path PATH]
-reviva set save --repo PATH --name NAME --file PATH...
-reviva set load --repo PATH --name NAME
-reviva set list --repo PATH
-reviva session list --repo PATH
-reviva session show --repo PATH --id SESSION_ID
-reviva findings list --repo PATH [--session SESSION_ID] [--triage]
-reviva export --repo PATH --session SESSION_ID [--format md|json] [--output PATH]
-```
-
-## Configuration
-
-`reviva init` creates `.reviva/` and writes default `config.toml` if missing.
-Use `reviva init --rewrite-config` to reserialize existing config and materialize new default fields.
-All commands read `.reviva/config.toml` from the target repository root.
-
-Example:
-
-```toml
-backend_url = "http://127.0.0.1:8080"
-model = "local-model-name"
-prompt_wrapper = "chatml"
-llama_lifecycle_policy = "ensure-running-and-stop"
-llama_kv_cache = true
-llama_slot_id = 0
-llama_model_path = "path/to/models/my-model/model.gguf" # Windows -> "path\\to\\models\\my-model\\model.gguf"
-llama_server_path = "llama-server"
-timeout_ms = 60000
-max_tokens = 2048
-temperature = 0.1
-stop_sequences = []
-max_file_bytes = 262144
-estimated_prompt_tokens = 16000
-include = [] # optional glob-like patterns, ex: ["src/*", "crates/*/src/*"]
-exclude = [] # optional glob-like patterns, ex: ["src/generated/*", "**/*.snap"]
-```
-
-Notes:
-
-- `prompt_wrapper` defaults to `chatml` if omitted.
-- Use `plain` only as an explicit opt-in fallback when your backend expects raw prompt text.
-- `mode` is optional; if omitted, Reviva derives it from profile name/focus then falls back to `contract`.
-- `--max-findings` and `--max-output-tokens` override profile limits for the current run only.
-- `llama_lifecycle_policy` defaults to `ensure-running-and-stop` if omitted.
-- `llama_kv_cache` defaults to `false` if omitted.
-- `llama_slot_id` is optional; set it to pin repeated reviews to a stable llama-server slot.
-- `max_file_bytes` and `estimated_prompt_tokens` are conservative defaults, not hard domain invariants.
-- when `include` is non-empty, scan/map keeps only matching paths.
-- `exclude` removes matching paths from scan/map.
-
-## Target Selection Behavior
+### Target Selection
 
 `review` target resolution order:
 
 1. `--boundary-left` + `--boundary-right`
 2. one or more `--file`
-3. `--incremental-from <GIT_REF>` (changed files from `git diff`)
+3. `--incremental-from <GIT_REF>`
 4. interactive selection (TTY only)
 
-In non-interactive environments, Reviva fails fast if no explicit target is provided.
+In non-interactive shells, Reviva fails if no explicit target is provided.
 
-Boundary mode enforces deterministic ordering: `left -> right`.
+`--incremental-from` cannot be combined with `--file` or boundary flags.
+Boundary mode is deterministic: `left -> right`.
 
-`--incremental-from` cannot be combined with explicit `--file` or boundary flags.
-In incremental mode, Reviva sends diff hunks (`git diff --unified=3`) instead of full-file content.
-If a file has no diff payload, Reviva falls back to full-file content and records explicit warnings.
+### Session and Findings
+
+Session is canonical truth.
+
+- `.reviva/sessions/session-*.json`: canonical records
+- `.reviva/findings/*.json`: derived finding surfaces and indexes
+- `.reviva/exports/*`: human-facing exports
+
+Raw backend body is always preserved in session data even when parsing fails.
+
+## CLI Surface
+
+See full command reference:
+
+- [CLI Reference](docs/cli-reference.md)
+
+## Configuration
+
+`reviva init` creates `.reviva/config.toml` with defaults.
+
+See full field reference:
+
+- [Config Reference](docs/config-reference.md)
+
+Important behavior:
+
+- Path-like fields are normalized to absolute paths on `init`, `scan`, and `review`.
+- `llama_server_path` is kept as-is only when it is a bare command name (for example `llama-server`).
+- `include`/`exclude` rules are enforced both in scan and explicit review target loading.
 
 ## llama-server Integration
 
-When backend is `http://127.0.0.1:8080` or `http://localhost:8080`, Reviva manages `llama-server` explicitly:
+Reviva can manage `llama-server` when backend is local (`127.0.0.1:8080` or `localhost:8080`).
 
-- if server is active, Reviva reuses it
-- if server is inactive, Reviva starts it when lifecycle policy is `ensure-running` or `ensure-running-and-stop`
-- if lifecycle policy is `ensure-running`, Reviva leaves the started server running
-- if lifecycle policy is `ensure-running-and-stop`, Reviva stops the started server when command exits
-- if lifecycle policy is `manual`, Reviva does not start/stop server processes
-- if `llama-server` binary is missing, Reviva returns explicit install guidance
-- if `llama-server` is not invokable from `PATH`, Reviva tries common local fallbacks (including WinGet install path on Windows) before failing
-- if model path is missing in non-interactive mode, Reviva fails with a clear error
-- KV cache can be enabled with `--kv-cache on` (or `llama_kv_cache=true`) and optionally pinned via `--kv-slot` / `llama_slot_id`.
+Policies:
 
-## Output and Persistence
+- `manual`
+- `ensure-running`
+- `ensure-running-and-stop` (default)
 
-Reviva persists data under:
+KV cache options:
+
+- `--kv-cache on|off`
+- `--kv-slot SLOT_ID`
+
+## Data Layout
 
 ```text
 .reviva/
   config.toml
   repo-map.json
+  cache/
   sessions/
   findings/
   sets/
   exports/
 ```
 
-Session is the canonical truth source. Raw backend response is always preserved.
-`findings/` and `sets/` also keep derived index surfaces for quick inspection (`index.json`), while canonical state remains in sessions.
-`repo-map.json` is a scan snapshot (path, size, estimated tokens, review priority heuristic, suspicion) written by `reviva init` and refreshed on each `reviva scan`.
-Auto scan/map excludes non-reviewable and sensitive files (for example `.git/`, `.github/`, `.reviva/`, `node_modules/`, `.env*`, lockfiles, and common key/cert extensions).
+`repo-map.json` is refreshed by `init` (unless `--no-scan`) and `scan`.
 
-Reviva also keeps a derived local review cache (`.reviva/cache/review-cache.json`) keyed by prompt+backend identity:
+## Documentation
 
-- cache hit: backend call is skipped and cached raw response is reused
-- cache miss: backend is called and cache is updated after session save
-
-Finding normalization state is explicit:
-
-- `structured`
-- `partial`
-- `raw_only`
-
-If normalization is partial/raw-only, warnings are stored with reason tags.
-Markdown/JSON exports prioritize parsed response interpretation for readability; full raw backend body remains in session files.
-Exports now keep prompt/body readability by default:
-
-- Markdown export shows prompt metadata (hash/line/char counts) instead of dumping full prompt text.
-- JSON export includes prompt metadata and parsed response shape, while full prompt/raw bodies stay in canonical session JSON.
-- Derived findings files also use target slug + session suffix by default (example: `lib-rs-1773362000000.json`).
-- Canonical sessions remain `session-*.json` under `.reviva/sessions/` for stable `session show --id` behavior.
-
-Profile TOML supports optional limits:
-
-```toml
-name = "strict-launch"
-goal = "Conservative launch review"
-severity_scale = ["release-blocker", "pre-launch-fix", "post-launch-watch"]
-confidence_scale = ["definite", "likely", "uncertain"]
-risk_classes = ["correctness", "security", "operator-trust"]
-
-[limits]
-max_findings = 8
-max_output_tokens = 768
-```
-
-## Troubleshooting
-
-- `normalization_state=raw_only`: inspect `session show` warnings and raw response body.
-- backend timeouts/unreachable: verify `backend_url`, server status, and timeout settings.
-- prompt budget refusal: narrow target selection or shorten `--note`.
-- empty findings with non-empty response: verify output contract adherence and wrapper choice.
-- repeated review unexpectedly misses cache: check `review_cache_key` and backend/profile/mode/prompt changes in session warnings.
+- [Specification](docs/spec.md)
+- [Architecture](docs/architecture.md)
+- [Module Boundaries](docs/module.md)
+- [CLI Reference](docs/cli-reference.md)
+- [Config Reference](docs/config-reference.md)
+- [Roadmap](docs/roadmap.md)
+- [Milestones](docs/milestones.md)
 
 ## Development
 
-Run key tests:
+Run tests:
 
 ```bash
 cargo test -p reviva-prompts -p reviva-cli -p reviva-storage -p reviva-export

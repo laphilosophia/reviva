@@ -88,6 +88,10 @@ pub enum RepoError {
     PathOutsideRoot {
         path: String,
     },
+    PathExcludedByConfig {
+        path: String,
+        reason: String,
+    },
     GitUnavailable,
     GitDiffFailed {
         from: String,
@@ -116,6 +120,12 @@ impl fmt::Display for RepoError {
             Self::NonUtf8File { path } => write!(f, "file is not valid UTF-8: {path}"),
             Self::PathOutsideRoot { path } => {
                 write!(f, "path escapes repository root: {path}")
+            }
+            Self::PathExcludedByConfig { path, reason } => {
+                write!(
+                    f,
+                    "path is excluded from review by config/ignore rules: {path} ({reason})"
+                )
             }
             Self::GitUnavailable => write!(
                 f,
@@ -243,6 +253,26 @@ fn path_matches_any(path: &str, patterns: &[String]) -> bool {
         .any(|pattern| path_matches_pattern(path, pattern))
 }
 
+fn exclusion_reason_for_path(
+    path: &str,
+    config: &RepoScanConfig,
+    local_ignores: &[String],
+) -> Option<&'static str> {
+    if !config.include.is_empty() && !path_matches_any(path, &config.include) {
+        return Some("not_matched_by_include");
+    }
+    if path_matches_any(path, &config.exclude) {
+        return Some("matched_exclude");
+    }
+    if is_ignored(path, local_ignores) {
+        return Some("matched_local_ignore");
+    }
+    if is_excluded_from_auto_review(path) {
+        return Some("auto_excluded");
+    }
+    None
+}
+
 fn is_excluded_from_auto_review(path: &str) -> bool {
     let lower = path.to_ascii_lowercase();
     if lower == ".git"
@@ -277,6 +307,9 @@ fn is_excluded_from_auto_review(path: &str) -> bool {
             | ".yarnrc.yml"
             | ".pypirc"
             | ".netrc"
+            | ".prettierignore"
+            | ".prettierrc.json"
+            | "eslint.config.js"
             | "package.json"
             | "package-lock.json"
             | "pnpm-lock.yaml"
@@ -290,6 +323,12 @@ fn is_excluded_from_auto_review(path: &str) -> bool {
             | "jsconfig.json"
             | "id_rsa"
             | "id_ed25519"
+            | "CHANGELOG.md"
+            | "CODE_OF_CONDUCT.md"
+            | "CONTRIBUTING.md"
+            | "LICENSE"
+            | "README.md"
+            | "SECURITY.md"
     ) {
         return true;
     }
@@ -395,13 +434,7 @@ pub fn scan_repository(root: &Path, config: &RepoScanConfig) -> Result<ScanResul
                 path: path.display().to_string(),
             })?;
         let normalized = normalize_path(relative);
-        if !config.include.is_empty() && !path_matches_any(&normalized, &config.include) {
-            continue;
-        }
-        if path_matches_any(&normalized, &config.exclude) {
-            continue;
-        }
-        if is_ignored(&normalized, &local_ignores) || is_excluded_from_auto_review(&normalized) {
+        if exclusion_reason_for_path(&normalized, config, &local_ignores).is_some() {
             continue;
         }
 
@@ -479,8 +512,15 @@ pub fn load_target_files(
     target: &RevivaTarget,
     config: &RepoScanConfig,
 ) -> Result<Vec<LoadedFile>, RepoError> {
+    let local_ignores = read_local_ignores(root)?;
     let mut files = Vec::new();
     for relative in target.as_paths() {
+        if let Some(reason) = exclusion_reason_for_path(relative, config, &local_ignores) {
+            return Err(RepoError::PathExcludedByConfig {
+                path: relative.to_string(),
+                reason: reason.to_string(),
+            });
+        }
         let absolute = resolve_target_path(root, relative)?;
         if detect_binary(&absolute)? {
             return Err(RepoError::BinaryFileRejected {
@@ -521,10 +561,17 @@ pub fn load_incremental_target_files(
     from: &str,
     context_lines: usize,
 ) -> Result<IncrementalLoadResult, RepoError> {
+    let local_ignores = read_local_ignores(root)?;
     let mut files = Vec::new();
     let mut fallback_full_files = Vec::new();
 
     for relative in target.as_paths() {
+        if let Some(reason) = exclusion_reason_for_path(relative, config, &local_ignores) {
+            return Err(RepoError::PathExcludedByConfig {
+                path: relative.to_string(),
+                reason: reason.to_string(),
+            });
+        }
         let absolute = resolve_target_path(root, relative)?;
         if detect_binary(&absolute)? {
             return Err(RepoError::BinaryFileRejected {
@@ -699,7 +746,8 @@ fn git_diff_patch_for_file(
 
 #[cfg(test)]
 mod tests {
-    use super::{scan_repository, RepoScanConfig};
+    use super::{load_target_files, scan_repository, RepoError, RepoScanConfig};
+    use reviva_core::RevivaTarget;
     use std::fs;
     use tempfile::TempDir;
 
@@ -790,5 +838,33 @@ mod tests {
         assert!(paths.contains(&"src/main.ts".to_string()));
         assert!(!paths.contains(&"src/gen/tmp.ts".to_string()));
         assert!(!paths.contains(&"tests/main.test.ts".to_string()));
+    }
+
+    #[test]
+    fn explicit_target_is_blocked_when_excluded_by_config() {
+        let temp = TempDir::new().expect("tempdir");
+        fs::create_dir_all(temp.path().join("packages/docs")).expect("mkdir docs");
+        fs::write(temp.path().join("packages/docs/guide.md"), "# guide\n").expect("guide");
+
+        let target = RevivaTarget::Single("packages/docs/guide.md".to_string());
+        let error = load_target_files(
+            temp.path(),
+            &target,
+            &RepoScanConfig {
+                max_file_bytes: 256 * 1024,
+                include_extensions: None,
+                include: vec!["packages/**/*".to_string()],
+                exclude: vec!["packages/docs/**/*".to_string()],
+            },
+        )
+        .expect_err("explicit excluded target must fail");
+
+        match error {
+            RepoError::PathExcludedByConfig { path, reason } => {
+                assert_eq!(path, "packages/docs/guide.md");
+                assert_eq!(reason, "matched_exclude");
+            }
+            other => panic!("unexpected error: {other}"),
+        }
     }
 }

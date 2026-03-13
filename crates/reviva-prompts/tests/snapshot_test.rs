@@ -139,6 +139,31 @@ fn oversized_budget_refusal_message_is_explicit() {
 }
 
 #[test]
+fn docs_only_targets_add_documentation_policy_guardrail() {
+    let profile =
+        built_in_review_profile("launch-readiness").expect("launch-readiness profile must exist");
+    let result = build_prompt(
+        RevivaMode::LaunchReadiness,
+        &profile,
+        &RevivaTarget::Single("packages/cli/README.md".to_string()),
+        &[PromptFile {
+            path: "packages/cli/README.md".to_string(),
+            content: "# docs".to_string(),
+            estimated_tokens: 16,
+            suspicion: None,
+        }],
+        None,
+        &PromptBuildConfig::default(),
+    )
+    .expect("prompt should build");
+
+    assert!(result.prompt.contains("Documentation-only policy:"));
+    assert!(result
+        .prompt
+        .contains("do not infer runtime bugs that require source/runtime evidence"));
+}
+
+#[test]
 fn normalization_states_cover_structured_partial_raw_only() {
     let structured = "SUMMARY:\n- ok\nFINDINGS:\n- summary: Missing timeout\nseverity: high\nconfidence: high\nlocation: src/main.rs\nevidence: client.call()\nwhy: can hang\naction: add timeout\n";
     let partial = "SUMMARY:\n- ok\nFINDINGS:\n- summary: Weak guard\nconfidence: medium\n";

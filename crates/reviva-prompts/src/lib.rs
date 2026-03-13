@@ -482,6 +482,18 @@ pub fn build_prompt(
         "- Report findings only when location and evidence are concrete in provided files.\n",
     );
     prompt.push_str("- If evidence is weak, use the lowest confidence label and explain uncertainty in `why`.\n\n");
+    if is_docs_only_selection(files) {
+        prompt.push_str("Documentation-only policy:\n");
+        prompt.push_str(
+            "- Documentation-only target detected; do not infer runtime bugs that require source/runtime evidence.\n",
+        );
+        prompt.push_str(
+            "- Use security/memory/performance risk only when text explicitly contains unsafe instruction, contradictory contract, or secret-handling issue.\n",
+        );
+        prompt.push_str(
+            "- If issue is mostly missing detail or clarity, prefer maintainability/operator-trust with low confidence.\n\n",
+        );
+    }
 
     if let Some(note) = note {
         prompt.push_str("User note:\n");
@@ -545,6 +557,25 @@ pub fn build_prompt(
         prompt,
         estimated_tokens,
     })
+}
+
+fn is_docs_only_selection(files: &[PromptFile]) -> bool {
+    !files.is_empty() && files.iter().all(|file| is_docs_like_path(&file.path))
+}
+
+fn is_docs_like_path(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    lower.ends_with(".md")
+        || lower.ends_with(".mdx")
+        || lower.ends_with(".rst")
+        || lower.ends_with(".adoc")
+        || lower.ends_with(".txt")
+        || lower.ends_with(".rdoc")
+        || lower.ends_with("readme")
+        || lower.ends_with("changelog")
+        || lower.ends_with("license")
+        || lower.contains("/docs/")
+        || lower.contains("\\docs\\")
 }
 
 pub fn normalize_findings(

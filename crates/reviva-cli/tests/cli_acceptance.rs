@@ -1,4 +1,5 @@
 use httpmock::{Method::POST, MockServer};
+use reviva_storage::Storage;
 use serde_json::Value;
 use std::fs;
 use std::path::Path;
@@ -89,6 +90,76 @@ fn init_creates_default_config_and_repo_map() {
         .expect("rewritten config");
     assert!(rewritten.contains("include = []"));
     assert!(rewritten.contains("exclude = []"));
+}
+
+#[test]
+fn init_normalizes_config_paths_without_rewrite_flag() {
+    let temp = TempDir::new().expect("tempdir");
+    fs::create_dir_all(temp.path().join("src")).expect("mkdir");
+    fs::write(
+        temp.path().join("src/main.rs"),
+        "fn main() { println!(\"hello\"); }\n",
+    )
+    .expect("write");
+
+    run_cmd(
+        temp.path(),
+        &[
+            "init",
+            "--repo",
+            temp.path().to_str().expect("repo str"),
+            "--no-scan",
+        ],
+    );
+
+    fs::write(
+        temp.path().join(".reviva/config.toml"),
+        r#"backend_url = "http://127.0.0.1:8080"
+model = "test"
+review_profile_file = "profiles/security.toml"
+llama_server_path = "./bin/llama-server"
+llama_model_path = "models/local.gguf"
+timeout_ms = 10000
+max_tokens = 512
+temperature = 0.1
+stop_sequences = []
+max_file_bytes = 262144
+estimated_prompt_tokens = 16000
+include = []
+exclude = []
+"#,
+    )
+    .expect("config");
+
+    run_cmd(
+        temp.path(),
+        &[
+            "init",
+            "--repo",
+            temp.path().to_str().expect("repo str"),
+            "--no-scan",
+        ],
+    );
+
+    let storage = Storage::new(temp.path());
+    let config = storage.load_config().expect("load normalized config");
+
+    let profile_file = config
+        .review_profile_file
+        .as_deref()
+        .expect("review_profile_file");
+    let model_path = config
+        .llama_model_path
+        .as_deref()
+        .expect("llama_model_path");
+    let server_path = config
+        .llama_server_path
+        .as_deref()
+        .expect("llama_server_path");
+
+    assert!(Path::new(profile_file).is_absolute());
+    assert!(Path::new(model_path).is_absolute());
+    assert!(Path::new(server_path).is_absolute());
 }
 
 #[test]

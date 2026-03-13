@@ -11,7 +11,7 @@ use reviva_prompts::{
 };
 use reviva_repo::{
     estimated_target_tokens, load_incremental_target_files, load_target_files,
-    resolve_incremental_target, scan_repository, RepoScanConfig,
+    resolve_incremental_target, scan_repository, LoadedFile, RepoScanConfig,
 };
 use reviva_storage::{AppConfig, RepoMap, RepoMapEntry, Storage};
 use std::collections::BTreeMap;
@@ -59,8 +59,9 @@ fn cmd_init(args: &[String]) -> Result<(), String> {
     let rewrite_config = has_flag(args, "--rewrite-config");
     let config_preexisting = storage.config_path().exists();
     storage.init().map_err(|error| error.to_string())?;
-    if rewrite_config {
-        let config = storage.load_config().map_err(|error| error.to_string())?;
+    let mut config = storage.load_config().map_err(|error| error.to_string())?;
+    let config_normalized = normalize_config_paths_for_repo(&repo, &mut config)?;
+    if rewrite_config || config_normalized {
         storage
             .save_config(&config)
             .map_err(|error| error.to_string())?;
@@ -85,7 +86,6 @@ fn cmd_init(args: &[String]) -> Result<(), String> {
         return Ok(());
     }
 
-    let config = storage.load_config().map_err(|error| error.to_string())?;
     let repo_config = repo_scan_config_from_app_config(&config);
     let scan = scan_repository(&repo, &repo_config).map_err(|error| error.to_string())?;
     let entries = scan
@@ -116,7 +116,12 @@ fn cmd_scan(args: &[String]) -> Result<(), String> {
     let repo = parse_repo_arg(args)?;
     let storage = Storage::new(&repo);
     storage.init().map_err(|error| error.to_string())?;
-    let config = storage.load_config().map_err(|error| error.to_string())?;
+    let mut config = storage.load_config().map_err(|error| error.to_string())?;
+    if normalize_config_paths_for_repo(&repo, &mut config)? {
+        storage
+            .save_config(&config)
+            .map_err(|error| error.to_string())?;
+    }
     let repo_config = repo_scan_config_from_app_config(&config);
     let result = scan_repository(&repo, &repo_config).map_err(|error| error.to_string())?;
     let repo_map = RepoMap {
@@ -182,13 +187,13 @@ fn cmd_review(args: &[String]) -> Result<(), String> {
     let storage = Storage::new(&repo);
     storage.init().map_err(|error| error.to_string())?;
     let mut config = storage.load_config().map_err(|error| error.to_string())?;
-    let mut config_updated = false;
+    let mut config_updated = normalize_config_paths_for_repo(&repo, &mut config)?;
     if let Some(path) = llama_model_path {
-        config.llama_model_path = Some(path);
+        config.llama_model_path = Some(normalize_config_path_value(&repo, &path, false)?);
         config_updated = true;
     }
     if let Some(path) = llama_server_path {
-        config.llama_server_path = Some(path);
+        config.llama_server_path = Some(normalize_config_path_value(&repo, &path, true)?);
         config_updated = true;
     }
     if let Some(value) = prompt_wrapper_arg {
@@ -265,6 +270,7 @@ fn cmd_review(args: &[String]) -> Result<(), String> {
             Vec::new(),
         )
     };
+    let docs_only_target = is_docs_only_loaded_files(&loaded);
 
     for file in &loaded {
         if let Some(suspicion) = &file.suspicion {
@@ -397,6 +403,11 @@ fn cmd_review(args: &[String]) -> Result<(), String> {
     for finding in &mut findings {
         finding.normalization_state = normalization_state;
     }
+    let docs_only_filtered_count = if docs_only_target {
+        apply_docs_only_finding_guardrail(&mut findings)
+    } else {
+        0
+    };
 
     let mut warnings = vec![
         format!("mode_source={mode_source}"),
@@ -429,7 +440,16 @@ fn cmd_review(args: &[String]) -> Result<(), String> {
             "estimated_token_budget={}",
             estimated_target_tokens(&loaded, note.as_deref())
         ),
+        format!(
+            "docs_only_target={}",
+            if docs_only_target { "yes" } else { "no" }
+        ),
     ];
+    if docs_only_filtered_count > 0 {
+        warnings.push(format!(
+            "docs_only_guardrail_filtered={docs_only_filtered_count}"
+        ));
+    }
     if let Some(probe) = llama_health_probe {
         warnings.push(format!("llama_health_probe_path={}", probe.path));
         warnings.push(format!("llama_health_probe_status={}", probe.status_code));
@@ -939,7 +959,10 @@ fn ensure_llama_server(
         });
     }
 
-    let server_bin = resolve_llama_server_binary(config.llama_server_path.as_deref())?;
+    let repo_root = storage.root().parent().ok_or_else(|| {
+        "storage root has no repository parent while resolving llama-server path".to_string()
+    })?;
+    let server_bin = resolve_llama_server_binary(config.llama_server_path.as_deref(), repo_root)?;
 
     let model_path = resolve_llama_model_path(storage, config)?;
     let (host, port) = parse_http_host_port(&backend.base_url)?;
@@ -1006,9 +1029,13 @@ fn should_manage_llama_server(base_url: &str) -> bool {
     normalized == "http://127.0.0.1:8080" || normalized == "http://localhost:8080"
 }
 
-fn resolve_llama_server_binary(configured: Option<&str>) -> Result<String, String> {
+fn resolve_llama_server_binary(
+    configured: Option<&str>,
+    repo_root: &Path,
+) -> Result<String, String> {
     if let Some(server_bin) = configured {
-        return ensure_llama_server_invokable(server_bin).map(|_| server_bin.to_string());
+        let resolved = normalize_config_path_value(repo_root, server_bin, true)?;
+        return ensure_llama_server_invokable(&resolved).map(|_| resolved);
     }
 
     if ensure_llama_server_invokable("llama-server").is_ok() {
@@ -1086,8 +1113,11 @@ fn discover_llama_server_fallback_candidates() -> Vec<String> {
 }
 
 fn resolve_llama_model_path(storage: &Storage, config: &mut AppConfig) -> Result<String, String> {
+    let repo_root = storage.root().parent().ok_or_else(|| {
+        "storage root has no repository parent while resolving model path".to_string()
+    })?;
     if let Some(path) = config.llama_model_path.clone() {
-        return normalize_llama_model_path(&path);
+        return normalize_llama_model_path(repo_root, &path);
     }
 
     if !io::stdin().is_terminal() {
@@ -1103,7 +1133,7 @@ fn resolve_llama_model_path(storage: &Storage, config: &mut AppConfig) -> Result
     io::stdin()
         .read_line(&mut input)
         .map_err(|error| error.to_string())?;
-    let model_path = normalize_llama_model_path(input.trim())?;
+    let model_path = normalize_llama_model_path(repo_root, input.trim())?;
     config.llama_model_path = Some(model_path.clone());
     storage
         .save_config(config)
@@ -1111,11 +1141,16 @@ fn resolve_llama_model_path(storage: &Storage, config: &mut AppConfig) -> Result
     Ok(model_path)
 }
 
-fn normalize_llama_model_path(raw_path: &str) -> Result<String, String> {
+fn normalize_llama_model_path(repo_root: &Path, raw_path: &str) -> Result<String, String> {
     if raw_path.trim().is_empty() {
         return Err("boş model yolu verildi".to_string());
     }
-    let path = PathBuf::from(raw_path);
+    let candidate = PathBuf::from(raw_path);
+    let path = if candidate.is_absolute() {
+        candidate
+    } else {
+        repo_root.join(candidate)
+    };
     if !path.exists() {
         return Err(format!("model yolu bulunamadı: {raw_path}"));
     }
@@ -1298,6 +1333,68 @@ fn parse_repo_arg(args: &[String]) -> Result<PathBuf, String> {
     PathBuf::from(repo)
         .canonicalize()
         .map_err(|error| format!("cannot resolve repository path: {error}"))
+}
+
+fn normalize_config_paths_for_repo(repo: &Path, config: &mut AppConfig) -> Result<bool, String> {
+    let mut changed = false;
+
+    if let Some(path) = config.review_profile_file.clone() {
+        let normalized = normalize_config_path_value(repo, &path, false)?;
+        if normalized != path {
+            config.review_profile_file = Some(normalized);
+            changed = true;
+        }
+    }
+
+    if let Some(path) = config.llama_model_path.clone() {
+        let normalized = normalize_config_path_value(repo, &path, false)?;
+        if normalized != path {
+            config.llama_model_path = Some(normalized);
+            changed = true;
+        }
+    }
+
+    if let Some(path) = config.llama_server_path.clone() {
+        let normalized = normalize_config_path_value(repo, &path, true)?;
+        if normalized != path {
+            config.llama_server_path = Some(normalized);
+            changed = true;
+        }
+    }
+
+    Ok(changed)
+}
+
+fn normalize_config_path_value(
+    repo_root: &Path,
+    raw_path: &str,
+    allow_bare_command: bool,
+) -> Result<String, String> {
+    let trimmed = raw_path.trim();
+    if trimmed.is_empty() {
+        return Err("boş path verildi".to_string());
+    }
+    if allow_bare_command && is_bare_command_name(trimmed) {
+        return Ok(trimmed.to_string());
+    }
+
+    let candidate = PathBuf::from(trimmed);
+    let resolved = if candidate.is_absolute() {
+        candidate
+    } else {
+        repo_root.join(candidate)
+    };
+    if resolved.exists() {
+        let canonical = resolved
+            .canonicalize()
+            .map_err(|error| format!("path canonicalize edilemedi: {error}"))?;
+        return Ok(canonical.to_string_lossy().to_string());
+    }
+    Ok(resolved.to_string_lossy().to_string())
+}
+
+fn is_bare_command_name(value: &str) -> bool {
+    !value.contains('\\') && !value.contains('/') && !value.starts_with('.') && !value.contains(':')
 }
 
 fn resolve_review_mode(
@@ -1844,6 +1941,47 @@ fn normalize_summary_for_triage(summary: &str) -> String {
         .to_ascii_lowercase()
 }
 
+fn is_docs_only_loaded_files(files: &[LoadedFile]) -> bool {
+    !files.is_empty() && files.iter().all(|file| is_docs_like_path(&file.path))
+}
+
+fn is_docs_like_path(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    lower.ends_with(".md")
+        || lower.ends_with(".mdx")
+        || lower.ends_with(".rst")
+        || lower.ends_with(".adoc")
+        || lower.ends_with(".txt")
+        || lower.ends_with(".rdoc")
+        || lower.ends_with("readme")
+        || lower.ends_with("changelog")
+        || lower.ends_with("license")
+        || lower.contains("/docs/")
+        || lower.contains("\\docs\\")
+}
+
+fn apply_docs_only_finding_guardrail(findings: &mut Vec<reviva_core::Finding>) -> usize {
+    let before = findings.len();
+    findings.retain(|finding| {
+        if !is_docs_runtime_risk_class(finding.risk_class.as_deref()) {
+            return true;
+        }
+        finding.confidence == reviva_core::Confidence::High
+    });
+    before.saturating_sub(findings.len())
+}
+
+fn is_docs_runtime_risk_class(risk_class: Option<&str>) -> bool {
+    matches!(
+        risk_class.map(|value| value.trim().to_ascii_lowercase()),
+        Some(value)
+            if value == "security"
+                || value == "memory"
+                || value == "performance"
+                || value == "correctness"
+    )
+}
+
 #[derive(Debug, Default)]
 struct IncrementalWarnings {
     from: Option<String>,
@@ -1892,24 +2030,34 @@ fn warning_value<'a>(warning: &'a str, prefix: &str) -> Option<&'a str> {
     warning.strip_prefix(prefix)
 }
 
+const CLI_USAGE_LINES: &[&str] = &[
+    "reviva init [--repo PATH] [--no-scan] [--rewrite-config]",
+    "reviva scan [--repo PATH]",
+    "reviva review --repo PATH [--mode MODE] [--profile NAME] [--profile-file PATH] [--max-findings N] [--max-output-tokens N] [--file PATH]... [--boundary-left PATH --boundary-right PATH] [--incremental-from GIT_REF] [--note TEXT] [--prompt-wrapper plain|chatml] [--kv-cache on|off] [--kv-slot SLOT_ID] [--llama-lifecycle manual|ensure-running|ensure-running-and-stop] [--preview-only] [--llama-model-path PATH_OR_DIR] [--llama-server-path PATH]",
+    "reviva set save --repo PATH --name NAME --file PATH...",
+    "reviva set load --repo PATH --name NAME",
+    "reviva set list --repo PATH",
+    "reviva session list --repo PATH",
+    "reviva session show --repo PATH --id SESSION_ID",
+    "reviva findings list --repo PATH [--session SESSION_ID] [--triage]",
+    "reviva export --repo PATH --session SESSION_ID [--format md|json] [--output PATH]",
+];
+
 fn print_usage() {
-    println!("reviva init [--repo PATH] [--no-scan] [--rewrite-config]");
-    println!("reviva scan [--repo PATH]");
-    println!("reviva review --repo PATH [--mode MODE] [--profile NAME] [--profile-file PATH] [--max-findings N] [--max-output-tokens N] [--file PATH]... [--boundary-left PATH --boundary-right PATH] [--incremental-from GIT_REF] [--note TEXT] [--prompt-wrapper plain|chatml] [--kv-cache on|off] [--kv-slot SLOT_ID] [--llama-lifecycle manual|ensure-running|ensure-running-and-stop] [--preview-only] [--llama-model-path PATH_OR_DIR] [--llama-server-path PATH]");
-    println!("reviva set save --repo PATH --name NAME --file PATH...");
-    println!("reviva set load --repo PATH --name NAME");
-    println!("reviva set list --repo PATH");
-    println!("reviva session list --repo PATH");
-    println!("reviva session show --repo PATH --id SESSION_ID");
-    println!("reviva findings list --repo PATH [--session SESSION_ID] [--triage]");
-    println!("reviva export --repo PATH --session SESSION_ID [--format md|json] [--output PATH]");
+    for line in CLI_USAGE_LINES {
+        println!("{line}");
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        backend_health_probe_paths, extract_incremental_warnings, is_healthy_status_code,
-        parse_http_host_port,
+        apply_docs_only_finding_guardrail, backend_health_probe_paths,
+        extract_incremental_warnings, is_docs_like_path, is_healthy_status_code,
+        parse_http_host_port, CLI_USAGE_LINES,
+    };
+    use reviva_core::{
+        Confidence, Finding, NormalizationState, RevivaMode, Severity, SeverityOrigin,
     };
 
     #[test]
@@ -1954,5 +2102,155 @@ mod tests {
         assert_eq!(parsed.file_count, Some(2));
         assert_eq!(parsed.fallback_full_file_count, Some(1));
         assert_eq!(parsed.fallback_full_files, vec!["src/a.rs".to_string()]);
+    }
+
+    #[test]
+    fn docs_like_path_detection_covers_markdown_and_docs_dir() {
+        assert!(is_docs_like_path("README.md"));
+        assert!(is_docs_like_path("docs/ops/runbook.rst"));
+        assert!(is_docs_like_path("guides/CHANGELOG"));
+        assert!(!is_docs_like_path("src/main.rs"));
+    }
+
+    #[test]
+    fn docs_only_guardrail_drops_low_confidence_runtime_risks() {
+        let mut findings = vec![
+            Finding {
+                id: "1".to_string(),
+                session_id: "s".to_string(),
+                review_mode: RevivaMode::LaunchReadiness,
+                target: "README.md".to_string(),
+                summary: "Runtime security claim".to_string(),
+                why_it_matters: None,
+                severity: Some(Severity::High),
+                severity_origin: SeverityOrigin::Normalized,
+                confidence: Confidence::Medium,
+                risk_class: Some("security".to_string()),
+                action: None,
+                status: None,
+                location_hint: None,
+                evidence_text: None,
+                raw_labels: Vec::new(),
+                normalization_state: NormalizationState::Structured,
+            },
+            Finding {
+                id: "2".to_string(),
+                session_id: "s".to_string(),
+                review_mode: RevivaMode::LaunchReadiness,
+                target: "README.md".to_string(),
+                summary: "Docs clarity gap".to_string(),
+                why_it_matters: None,
+                severity: Some(Severity::Medium),
+                severity_origin: SeverityOrigin::Normalized,
+                confidence: Confidence::Low,
+                risk_class: Some("operator-trust".to_string()),
+                action: None,
+                status: None,
+                location_hint: None,
+                evidence_text: None,
+                raw_labels: Vec::new(),
+                normalization_state: NormalizationState::Structured,
+            },
+            Finding {
+                id: "3".to_string(),
+                session_id: "s".to_string(),
+                review_mode: RevivaMode::LaunchReadiness,
+                target: "README.md".to_string(),
+                summary: "Explicit high-confidence runtime issue".to_string(),
+                why_it_matters: None,
+                severity: Some(Severity::High),
+                severity_origin: SeverityOrigin::Normalized,
+                confidence: Confidence::High,
+                risk_class: Some("correctness".to_string()),
+                action: None,
+                status: None,
+                location_hint: None,
+                evidence_text: None,
+                raw_labels: Vec::new(),
+                normalization_state: NormalizationState::Structured,
+            },
+        ];
+
+        let filtered = apply_docs_only_finding_guardrail(&mut findings);
+        assert_eq!(filtered, 1);
+        assert_eq!(findings.len(), 2);
+        assert!(findings.iter().any(|finding| finding.id == "2"));
+        assert!(findings.iter().any(|finding| finding.id == "3"));
+    }
+
+    #[test]
+    fn cli_usage_stays_in_sync_with_docs_command_index() {
+        let docs = include_str!("../../../docs/cli-reference.md");
+        let mut command_lines = Vec::<&str>::new();
+        let mut in_block = false;
+        let mut found_index = false;
+
+        for line in docs.lines() {
+            if line.trim() == "## Command Index" {
+                found_index = true;
+                continue;
+            }
+            if !found_index {
+                continue;
+            }
+            if line.trim() == "```text" {
+                in_block = true;
+                continue;
+            }
+            if in_block && line.trim() == "```" {
+                break;
+            }
+            if in_block && !line.trim().is_empty() {
+                command_lines.push(line.trim());
+            }
+        }
+
+        assert!(
+            found_index,
+            "docs/cli-reference.md must include '## Command Index' section"
+        );
+        assert!(
+            !command_lines.is_empty(),
+            "docs/cli-reference.md command index code block is empty"
+        );
+        assert_eq!(command_lines, CLI_USAGE_LINES);
+    }
+
+    #[test]
+    fn readme_core_concepts_headings_stay_in_sync() {
+        let readme = include_str!("../../../README.md");
+        let mut in_core_concepts = false;
+        let mut headings = Vec::<&str>::new();
+
+        for line in readme.lines() {
+            let trimmed = line.trim();
+            if trimmed == "## Core Concepts" {
+                in_core_concepts = true;
+                continue;
+            }
+            if !in_core_concepts {
+                continue;
+            }
+            if trimmed.starts_with("## ") {
+                break;
+            }
+            if trimmed.starts_with("### ") {
+                headings.push(trimmed.trim_start_matches("### ").trim());
+            }
+        }
+
+        let expected = [
+            "Review Mode",
+            "Review Profile",
+            "Prompt Wrapper",
+            "Target Selection",
+            "Session and Findings",
+        ];
+
+        assert!(
+            in_core_concepts,
+            "README.md must include '## Core Concepts'"
+        );
+        assert_eq!(headings, expected);
     }
 }
